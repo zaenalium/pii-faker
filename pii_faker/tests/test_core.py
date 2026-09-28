@@ -1,16 +1,16 @@
-"""Tests for core PII Toolkit functionality."""
+"""Tests for core PII Faker functionality."""
 
 import pytest
 import polars as pl
 
-from pii_toolkit.core.config import PIIConfig, PIIMode, MatchStrategy, RedactionStyle
-from pii_toolkit.core.detector import PIIColumnDetector, detect_pii_columns
-from pii_toolkit.core.generators import PIIGenerator
-from pii_toolkit.core.redactor import PIIRedactor
-from pii_toolkit.core.mapper import PIIMapper
-from pii_toolkit.core.restorer import PIIRestorer
-from pii_toolkit.core.file_io import FileHandler
-from pii_toolkit.core.json_walker import JsonWalker
+from pii_faker.core.config import PIIConfig, PIIMode, MatchStrategy, RedactionStyle
+from pii_faker.core.detector import PIIColumnDetector, detect_pii_columns
+from pii_faker.core.generators import PIIGenerator
+from pii_faker.core.redactor import PIIRedactor
+from pii_faker.core.mapper import PIIMapper
+from pii_faker.core.restorer import PIIRestorer
+from pii_faker.core.file_io import FileHandler
+from pii_faker.core.json_walker import JsonWalker
 
 
 class TestPIIConfig:

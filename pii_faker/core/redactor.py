@@ -8,7 +8,7 @@ from typing import Dict, Any, Tuple
 
 import polars as pl
 
-from pii_toolkit.core.config import PIIConfig, RedactionStyle
+from pii_faker.core.config import PIIConfig, RedactionStyle
 
 
 class PIIRedactor:

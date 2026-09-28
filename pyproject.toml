@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pii-toolkit"
+name = "pii-faker"
 version = "0.1.0"
 description = "PII Fake/Redact Toolkit - Detect, fake, or redact PII in tabular and JSON datasets for LLM-safe data sharing"
 readme = "README.md"
@@ -11,7 +11,7 @@ license = {text = "MIT"}
 license-files = ["LICENSE*"]
 requires-python = ">=3.10"
 authors = [
-    {name = "PII Toolkit Contributors"}
+    {name = "PII Faker Contributors"}
 ]
 keywords = ["pii", "privacy", "llm", "data-protection", "fake-data"]
 classifiers = [
@@ -52,16 +52,16 @@ dev = [
 ]
 
 [project.scripts]
-pii-toolkit = "pii_toolkit.cli.main:app"
+pii-faker = "pii_faker.cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/pii-toolkit/pii-toolkit"
-Documentation = "https://github.com/pii-toolkit/pii-toolkit#readme"
-Repository = "https://github.com/pii-toolkit/pii-toolkit"
-Issues = "https://github.com/pii-toolkit/pii-toolkit/issues"
+Homepage = "https://github.com/zaenalium/pii-faker"
+Documentation = "https://github.com/zaenalium/pii-faker#readme"
+Repository = "https://github.com/zaenalium/pii-faker"
+Issues = "https://github.com/zaenalium/pii-faker/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["pii_toolkit"]
+packages = ["pii_faker"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [
@@ -70,7 +70,7 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["pii_toolkit/tests"]
+testpaths = ["pii_faker/tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"

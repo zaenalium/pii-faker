@@ -23,10 +23,13 @@ mapping_*.json
 mapping_*.db
 mapping_*.sqlite
 *.pii.json
-~/.pii_toolkit/
+~/.pii_faker/
 
 # Editors / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local agent config
+.commandcode/

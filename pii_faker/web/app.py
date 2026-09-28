@@ -1,5 +1,5 @@
 """
-PII Toolkit Web Application
+PII Faker Web Application
 
 FastAPI-based web interface for PII processing.
 Provides file upload, detection preview, processing, and restore functionality.
@@ -17,16 +17,16 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from pii_toolkit.core.config import PIIConfig, PIIMode, RedactionStyle, MatchStrategy
-from pii_toolkit.core.detector import PIIColumnDetector
-from pii_toolkit.core.generators import PIIGenerator
-from pii_toolkit.core.redactor import PIIRedactor
-from pii_toolkit.core.mapper import PIIMapper
-from pii_toolkit.core.restorer import PIIRestorer
-from pii_toolkit.core.file_io import FileHandler
+from pii_faker.core.config import PIIConfig, PIIMode, RedactionStyle, MatchStrategy
+from pii_faker.core.detector import PIIColumnDetector
+from pii_faker.core.generators import PIIGenerator
+from pii_faker.core.redactor import PIIRedactor
+from pii_faker.core.mapper import PIIMapper
+from pii_faker.core.restorer import PIIRestorer
+from pii_faker.core.file_io import FileHandler
 
 app = FastAPI(
-    title="PII Toolkit",
+    title="PII Faker",
     description="PII Fake/Redact Toolkit - Web Interface",
     version="0.1.0",
 )
@@ -66,7 +66,7 @@ async def detect_pii(
     try:
         # Save uploaded file temporarily
         job_id = str(uuid.uuid4())
-        temp_dir = Path(tempfile.mkdtemp(prefix="pii_toolkit_"))
+        temp_dir = Path(tempfile.mkdtemp(prefix="pii_faker_"))
         input_path = temp_dir / file.filename
 
         with open(input_path, "wb") as f:
@@ -625,7 +625,7 @@ async def restore_file(
     """Restore original values from faked/redacted data."""
     try:
         # Save files temporarily
-        temp_dir = Path(tempfile.mkdtemp(prefix="pii_toolkit_restore_"))
+        temp_dir = Path(tempfile.mkdtemp(prefix="pii_faker_restore_"))
 
         mapping_path = temp_dir / mapping_file.filename
         input_path = temp_dir / input_file.filename

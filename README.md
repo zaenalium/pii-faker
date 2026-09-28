@@ -1,4 +1,4 @@
-# PII Toolkit
+# PII Faker
 
 A Python toolkit for detecting, faking, or redacting Personally Identifiable Information (PII) in tabular and JSON datasets before sending them to Large Language Models (LLMs).
 
@@ -29,56 +29,56 @@ pip install -e ".[dev]"
 
 ```bash
 # Fake PII in a CSV file
-pii-toolkit process data.csv --output processed.csv --mapping-out mapping.json
+pii-faker process data.csv --output processed.csv --mapping-out mapping.json
 
 # Redact PII with partial style
-pii-toolkit process data.xlsx --mode redact --redact-style partial --output redacted.xlsx --mapping-out mapping.json
+pii-faker process data.xlsx --mode redact --redact-style partial --output redacted.xlsx --mapping-out mapping.json
 
 # Process nested JSON with explicit paths
-pii-toolkit process data.ndjson \
+pii-faker process data.ndjson \
   --extra-pii-columns "patient.patient_name,patient.contacts[*].email" \
   --output processed.ndjson --mapping-out mapping.json
 
 # Restore original values (tabular/JSON)
-pii-toolkit restore processed.csv --mapping mapping.json --output restored.csv
+pii-faker restore processed.csv --mapping mapping.json --output restored.csv
 
 # Restore free-form text (e.g. LLM prose referencing faked values)
-pii-toolkit restore llm_response.txt --mapping mapping.json --output restored.txt --text
+pii-faker restore llm_response.txt --mapping mapping.json --output restored.txt --text
 
 # Manage custom PII columns
-pii-toolkit columns add ssn
-pii-toolkit columns list
-pii-toolkit columns remove ssn
+pii-faker columns add ssn
+pii-faker columns list
+pii-faker columns remove ssn
 
 # Preview what would be processed without writing output
-pii-toolkit process data.csv --output processed.csv --dry-run
+pii-faker process data.csv --output processed.csv --dry-run
 
 # Reproducible fakes + custom matching
-pii-toolkit process data.csv --output processed.csv --mapping-out mapping.json \
+pii-faker process data.csv --output processed.csv --mapping-out mapping.json \
   --seed 42 --match-strategy fuzzy --extra-pii-columns "ssn,dob" --override-defaults
 
 # Excel sheets and JSON schema sampling
-pii-toolkit process data.xlsx --output processed.xlsx --mapping-out mapping.json \
+pii-faker process data.xlsx --output processed.xlsx --mapping-out mapping.json \
   --sheets "Sheet1,Sheet3"
-pii-toolkit process data.ndjson --output processed.ndjson --mapping-out mapping.json \
+pii-faker process data.ndjson --output processed.ndjson --mapping-out mapping.json \
   --infer-schema-length 0
 
 # SQLite mapping for large runs (use .db/.sqlite extension)
-pii-toolkit process big.csv --output processed.csv --mapping-out mapping.db
+pii-faker process big.csv --output processed.csv --mapping-out mapping.db
 
 # Start web UI
-pii-toolkit serve --port 8000
+pii-faker serve --port 8000
 
 # Cleanup old mappings
-pii-toolkit cleanup --older-than 7d
+pii-faker cleanup --older-than 7d
 ```
 
 ### Python API
 
 ```python
 import polars as pl
-from pii_toolkit.core import process_dataframe, restore_dataframe, PIIConfig
-from pii_toolkit.core.mapper import PIIMapper
+from pii_faker.core import process_dataframe, restore_dataframe, PIIConfig
+from pii_faker.core.mapper import PIIMapper
 
 # Load data
 df = pl.read_csv("data.csv")
@@ -105,7 +105,7 @@ restored_df = restore_dataframe(processed_df, mapper)
 ### Web UI
 
 ```bash
-pii-toolkit serve --port 8000
+pii-faker serve --port 8000
 ```
 
 Open http://localhost:8000 in your browser to:
@@ -120,7 +120,7 @@ Open http://localhost:8000 in your browser to:
 ### Scenario A: JSON Strings in Tabular Cells
 
 ```bash
-pii-toolkit process data.csv \
+pii-faker process data.csv \
   --json-columns "metadata,payload" \
   --output processed.csv
 ```
@@ -128,7 +128,7 @@ pii-toolkit process data.csv \
 ### Scenario B: Native Nested JSON
 
 ```bash
-pii-toolkit process data.ndjson \
+pii-faker process data.ndjson \
   --extra-pii-columns "patient.patient_name,patient.contacts[*].email" \
   --output processed.ndjson
 ```
@@ -153,17 +153,17 @@ Built-in patterns include: `name`, `patient_name`, `member_name`, `phone`, `emai
 
 ```bash
 # Add custom columns
-pii-toolkit columns add ssn
-pii-toolkit columns add "patient.contacts[*].phone"
+pii-faker columns add ssn
+pii-faker columns add "patient.contacts[*].phone"
 
 # List all custom columns
-pii-toolkit columns list
+pii-faker columns list
 
 # Remove a column
-pii-toolkit columns remove ssn
+pii-faker columns remove ssn
 ```
 
-Custom columns are stored in `~/.pii_toolkit/config.yaml`.
+Custom columns are stored in `~/.pii_faker/config.yaml`.
 
 ### Match Strategies
 
@@ -186,7 +186,7 @@ Custom columns are stored in `~/.pii_toolkit/config.yaml`.
 ### Where Mappings Live
 
 - Mapping files are stored locally and never sent to the LLM
-- Default location: current directory or `~/.pii_toolkit/mappings/`
+- Default location: current directory or `~/.pii_faker/mappings/`
 - JSON (`.json`, small mappings) and SQLite (`.db`/`.sqlite`, large mappings) formats — chosen by `--mapping-out` extension
 
 ### What's in Mappings
@@ -200,13 +200,13 @@ Custom columns are stored in `~/.pii_toolkit/config.yaml`.
 
 ```bash
 # Delete mappings older than 7 days
-pii-toolkit cleanup --older-than 7d
+pii-faker cleanup --older-than 7d
 
 # Delete mappings older than 24 hours
-pii-toolkit cleanup --older-than 24h
+pii-faker cleanup --older-than 24h
 
 # Specify custom directory
-pii-toolkit cleanup --older-than 7d --directory /path/to/mappings
+pii-faker cleanup --older-than 7d --directory /path/to/mappings
 ```
 
 **Important**: Mapping files contain real PII. Treat them as sensitive data.
@@ -224,7 +224,7 @@ The toolkit builds mappings only for unique values, then applies them vectorized
 ### Benchmarks
 
 ```bash
-python -m pii_toolkit.tests.benchmark
+python -m pii_faker.tests.benchmark
 ```
 
 Expected throughput: 100k+ rows/second for typical datasets.
@@ -236,10 +236,10 @@ Expected throughput: 100k+ rows/second for typical datasets.
 pytest
 
 # Run with coverage
-pytest --cov=pii_toolkit
+pytest --cov=pii_faker
 
 # Run specific test file
-pytest pii_toolkit/tests/test_core.py
+pytest pii_faker/tests/test_core.py
 ```
 
 ## Limitations & Next Steps

@@ -1,18 +1,18 @@
 """
-Core module for PII Toolkit.
+Core module for PII Faker.
 
 Contains the main processing logic for PII detection, generation, redaction,
 and restoration.
 """
 
-from pii_toolkit.core.detector import detect_pii_columns, PIIColumnDetector
-from pii_toolkit.core.generators import PIIGenerator, FakeDataGenerator
-from pii_toolkit.core.redactor import PIIRedactor, RedactionStyle
-from pii_toolkit.core.mapper import PIIMapper, MappingStore
-from pii_toolkit.core.restorer import PIIRestorer
-from pii_toolkit.core.file_io import FileHandler
-from pii_toolkit.core.json_walker import JsonWalker
-from pii_toolkit.core.config import PIIConfig, PIIMode, MatchStrategy
+from pii_faker.core.detector import detect_pii_columns, PIIColumnDetector
+from pii_faker.core.generators import PIIGenerator, FakeDataGenerator
+from pii_faker.core.redactor import PIIRedactor, RedactionStyle
+from pii_faker.core.mapper import PIIMapper, MappingStore
+from pii_faker.core.restorer import PIIRestorer
+from pii_faker.core.file_io import FileHandler
+from pii_faker.core.json_walker import JsonWalker
+from pii_faker.core.config import PIIConfig, PIIMode, MatchStrategy
 
 __all__ = [
     "detect_pii_columns",

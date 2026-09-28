@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, List, Union
 
 import polars as pl
 
-from pii_toolkit.core.mapper import PIIMapper
+from pii_faker.core.mapper import PIIMapper
 
 
 class PIIRestorer:

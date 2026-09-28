@@ -1,5 +1,5 @@
 """
-Configuration models for PII Toolkit.
+Configuration models for PII Faker.
 """
 
 from enum import Enum

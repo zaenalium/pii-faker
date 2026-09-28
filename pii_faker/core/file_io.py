@@ -1,5 +1,5 @@
 """
-File I/O module for PII Toolkit.
+File I/O module for PII Faker.
 
 Handles reading and writing various file formats using Polars.
 Supports: CSV, TSV, Excel, JSON, NDJSON, Parquet.
@@ -10,7 +10,7 @@ from typing import Optional, List, Union, Dict, Any
 
 import polars as pl
 
-from pii_toolkit.core.config import PIIConfig
+from pii_faker.core.config import PIIConfig
 
 
 class FileHandler:

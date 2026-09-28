@@ -1,8 +1,8 @@
 """
-Benchmark script for PII Toolkit.
+Benchmark script for PII Faker.
 
 Measures throughput on generated data to verify performance claims.
-Run with: python -m pii_toolkit.tests.benchmark
+Run with: python -m pii_faker.tests.benchmark
 """
 
 import time
@@ -13,10 +13,10 @@ from typing import List
 import polars as pl
 from faker import Faker
 
-from pii_toolkit.core.config import PIIConfig, PIIMode
-from pii_toolkit.core.detector import PIIColumnDetector
-from pii_toolkit.core.generators import PIIGenerator
-from pii_toolkit.core.mapper import PIIMapper
+from pii_faker.core.config import PIIConfig, PIIMode
+from pii_faker.core.detector import PIIColumnDetector
+from pii_faker.core.generators import PIIGenerator
+from pii_faker.core.mapper import PIIMapper
 
 
 def generate_test_data(n_rows: int, n_unique_names: int = 1000) -> pl.DataFrame:
@@ -122,7 +122,7 @@ def benchmark_unique_values_approach(df: pl.DataFrame, config: PIIConfig) -> dic
 def run_benchmarks():
     """Run all benchmarks."""
     print("=" * 60)
-    print("PII Toolkit Performance Benchmarks")
+    print("PII Faker Performance Benchmarks")
     print("=" * 60)
 
     config = PIIConfig(mode=PIIMode.FAKE, seed=42)

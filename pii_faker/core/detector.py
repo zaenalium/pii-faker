@@ -12,7 +12,7 @@ from typing import List, Set, Optional, Dict, Any
 import polars as pl
 import yaml
 
-from pii_toolkit.core.config import PIIConfig, MatchStrategy
+from pii_faker.core.config import PIIConfig, MatchStrategy
 
 
 # Type alias for PII column info

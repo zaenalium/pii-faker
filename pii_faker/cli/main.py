@@ -1,5 +1,5 @@
 """
-PII Toolkit CLI
+PII Faker CLI
 
 Command-line interface for processing PII in datasets.
 Supports: process, restore, columns, cleanup, serve commands.
@@ -14,16 +14,16 @@ from rich.console import Console
 from rich.table import Table
 from rich import print as rprint
 
-from pii_toolkit.core.config import PIIConfig, PIIMode, RedactionStyle, MatchStrategy
-from pii_toolkit.core.detector import PIIColumnDetector
-from pii_toolkit.core.generators import PIIGenerator
-from pii_toolkit.core.redactor import PIIRedactor
-from pii_toolkit.core.mapper import PIIMapper
-from pii_toolkit.core.restorer import PIIRestorer
-from pii_toolkit.core.file_io import FileHandler
+from pii_faker.core.config import PIIConfig, PIIMode, RedactionStyle, MatchStrategy
+from pii_faker.core.detector import PIIColumnDetector
+from pii_faker.core.generators import PIIGenerator
+from pii_faker.core.redactor import PIIRedactor
+from pii_faker.core.mapper import PIIMapper
+from pii_faker.core.restorer import PIIRestorer
+from pii_faker.core.file_io import FileHandler
 
 app = typer.Typer(
-    name="pii-toolkit",
+    name="pii-faker",
     help="PII Fake/Redact Toolkit - Detect, fake, or redact PII in datasets for LLM-safe data sharing.",
     no_args_is_help=True,
 )
@@ -32,7 +32,7 @@ console = Console()
 
 def version_callback(value: bool):
     if value:
-        console.print("[bold blue]PII Toolkit[/bold blue] v0.1.0")
+        console.print("[bold blue]PII Faker[/bold blue] v0.1.0")
         raise typer.Exit()
 
 
@@ -44,7 +44,7 @@ def main(
     ),
 ):
     """
-    PII Toolkit - Detect, fake, or redact PII in datasets for LLM-safe data sharing.
+    PII Faker - Detect, fake, or redact PII in datasets for LLM-safe data sharing.
     """
     pass
 
@@ -303,7 +303,7 @@ def columns_command(
 
     # Default config path
     if config_path is None:
-        config_dir = Path.home() / ".pii_toolkit"
+        config_dir = Path.home() / ".pii_faker"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = str(config_dir / "config.yaml")
 
@@ -361,7 +361,7 @@ def columns_command(
 def cleanup(
     older_than: str = typer.Option("7d", "--older-than", help="Delete mappings older than (e.g., 7d, 24h)"),
     directory: str = typer.Option(
-        str(Path.home() / ".pii_toolkit" / "mappings"),
+        str(Path.home() / ".pii_faker" / "mappings"),
         "--directory", "-d", help="Mappings directory"
     ),
 ):
@@ -394,9 +394,9 @@ def serve(
 ):
     """Start the web UI server."""
     import uvicorn
-    from pii_toolkit.web.app import app as web_app
+    from pii_faker.web.app import app as web_app
 
-    console.print(f"[bold]Starting[/bold] PII Toolkit web UI on {host}:{port}...")
+    console.print(f"[bold]Starting[/bold] PII Faker web UI on {host}:{port}...")
     uvicorn.run(web_app, host=host, port=port)
 
 

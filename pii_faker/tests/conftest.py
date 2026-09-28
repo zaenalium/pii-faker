@@ -1,10 +1,10 @@
-"""Pytest configuration and fixtures for PII Toolkit tests."""
+"""Pytest configuration and fixtures for PII Faker tests."""
 
 import pytest
 import polars as pl
 from pathlib import Path
 
-from pii_toolkit.core.config import PIIConfig, PIIMode, MatchStrategy
+from pii_faker.core.config import PIIConfig, PIIMode, MatchStrategy
 
 
 @pytest.fixture

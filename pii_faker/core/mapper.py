@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
 
-from pii_toolkit.core.config import PIIConfig
+from pii_faker.core.config import PIIConfig
 
 
 class MappingStore:

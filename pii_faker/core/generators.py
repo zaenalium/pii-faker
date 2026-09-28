@@ -11,7 +11,7 @@ from functools import lru_cache
 import polars as pl
 from faker import Faker
 
-from pii_toolkit.core.config import PIIConfig
+from pii_faker.core.config import PIIConfig
 
 
 class PIIGenerator:
