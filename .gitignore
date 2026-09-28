@@ -14,6 +14,10 @@ venv/
 htmlcov/
 *.cover
 
+# Build artifacts
+dist/
+*.egg-info/
+
 # Mappings and local PII data (never commit real PII)
 mapping_*.json
 mapping_*.db
