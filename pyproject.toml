@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pii-toolkit"
+version = "0.1.0"
+description = "PII Fake/Redact Toolkit - Detect, fake, or redact PII in tabular and JSON datasets for LLM-safe data sharing"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "PII Toolkit Contributors"}
+]
+keywords = ["pii", "privacy", "llm", "data-protection", "fake-data"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "polars>=0.20.0",
+    "fastexcel>=0.9.0",
+    "xlsxwriter>=3.1.0",
+    "faker>=22.0.0",
+    "typer>=0.9.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.25.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-benchmark>=4.0.0",
+    "httpx>=0.25.0",
+]
+
+[project.scripts]
+pii-toolkit = "pii_toolkit.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/pii-toolkit/pii-toolkit"
+Documentation = "https://github.com/pii-toolkit/pii-toolkit#readme"
+Repository = "https://github.com/pii-toolkit/pii-toolkit"
+Issues = "https://github.com/pii-toolkit/pii-toolkit/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pii_toolkit"]
+
+[tool.pytest.ini_options]
+testpaths = ["pii_toolkit/tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

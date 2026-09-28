@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PII Toolkit</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px 0;
+            margin-bottom: 30px;
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            opacity: 0.9;
+            font-size: 1.1rem;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            background: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+
+        .tab:hover {
+            background: #667eea;
+            color: white;
+        }
+
+        .tab.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .upload-zone {
+            border: 3px dashed #667eea;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: #f8f9ff;
+        }
+
+        .upload-zone:hover {
+            background: #eef0ff;
+            border-color: #764ba2;
+        }
+
+        .upload-zone.dragover {
+            background: #667eea;
+            color: white;
+        }
+
+        .upload-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #555;
+        }
+
+        input[type="text"],
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus,
+        input[type="number"]:focus,
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            padding: 14px 28px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #d0d0d0;
+        }
+
+        .columns-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .column-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: #e8eaf6;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            color: #333;
+        }
+
+        .column-tag.selected {
+            background: #667eea;
+            color: white !important;
+        }
+
+        .column-tag.selected * {
+            color: white !important;
+        }
+
+        .column-tag input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .tree-view {
+            margin: 15px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+
+        .tree-item {
+            padding: 8px 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-radius: 6px;
+            margin: 2px 0;
+        }
+
+        .tree-item:hover {
+            background: #e8eaf6;
+        }
+
+        .tree-item.nested {
+            padding-left: 35px;
+        }
+
+        .tree-item.nested-deep {
+            padding-left: 60px;
+        }
+
+        .tree-item .path {
+            color: #333;
+            font-weight: 500;
+        }
+
+        .tree-item .category {
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: #e0e0e0;
+            color: #666;
+        }
+
+        .tree-item.selected {
+            background: #667eea;
+        }
+
+        .tree-item.selected .path {
+            color: white;
+        }
+
+        .tree-item.selected .category {
+            background: rgba(255,255,255,0.3);
+            color: white;
+        }
+
+        .tree-parent {
+            font-weight: 600;
+            color: #555;
+            padding: 8px 0 4px 0;
+            border-bottom: 1px solid #ddd;
+            margin-bottom: 4px;
+        }
+
+        .result-section {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .result-section.visible {
+            display: block;
+        }
+
+        .download-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 16px 32px;
+            background: #4caf50;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            margin: 10px;
+            transition: all 0.3s;
+        }
+
+        .download-btn:hover {
+            background: #388e3c;
+            transform: translateY(-2px);
+        }
+
+        .warning-box {
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            color: #856404;
+        }
+
+        .info-box {
+            background: #d1ecf1;
+            border: 2px solid #17a2b8;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            color: #0c5460;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .loading.visible {
+            display: block;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid #e0e0e0;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .row {
+            display: flex;
+            gap: 20px;
+        }
+
+        .col {
+            flex: 1;
+        }
+
+        .mode-toggle {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .mode-btn {
+            flex: 1;
+            padding: 15px;
+            background: #e0e0e0;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+
+        .mode-btn.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .tree-view {
+            margin: 15px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            font-family: monospace;
+        }
+
+        .tree-item {
+            padding: 5px 0;
+            padding-left: 20px;
+        }
+
+        .tree-item::before {
+            content: "├─ ";
+            color: #999;
+        }
+
+        .tree-item:last-child::before {
+            content: "└─ ";
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>🛡️ PII Toolkit</h1>
+            <p>Detect, fake, or redact PII in datasets for LLM-safe data sharing</p>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('process')">Process Data</button>
+            <button class="tab" onclick="switchTab('restore')">Restore Data</button>
+        </div>
+
+        <!-- Process Tab -->
+        <div id="process-tab" class="card">
+            <h2 style="margin-bottom: 20px;">📤 Upload & Process</h2>
+
+            <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+                <div class="upload-icon">📁</div>
+                <p><strong>Drag & drop a file here</strong></p>
+                <p>or click to browse</p>
+                <p style="margin-top: 10px; font-size: 0.9rem; color: #666;">
+                    Supports: CSV, Excel, JSON, NDJSON, Parquet
+                </p>
+            </div>
+            <input type="file" id="file-input" accept=".csv,.tsv,.xlsx,.xls,.json,.ndjson,.jsonl,.parquet" style="display: none">
+
+            <div id="file-info" class="hidden" style="margin-top: 15px;">
+                <strong>Selected:</strong> <span id="filename"></span>
+            </div>
+
+            <div id="detection-section" class="hidden" style="margin-top: 30px;">
+                <h3>🔍 Detected PII Columns</h3>
+                <div id="no-columns-message" class="hidden" style="margin-top: 10px; color: #856404; background: #fff3cd; padding: 10px; border-radius: 5px;">
+                    No PII columns detected. You can add custom columns below.
+                </div>
+                <div id="detections-list" class="columns-list"></div>
+
+                <div class="form-group" style="margin-top: 20px;">
+                    <label for="extra-columns">Extra PII Columns</label>
+                    <input type="text" id="extra-columns" placeholder="ssn, data.tanggal_lahir, patient.contacts[*].phone">
+                    <small style="color: #666; display: block; margin-top: 5px;">
+                        Comma-separated. Supports nested paths: <code>parent.field</code> or <code>parent[*].field</code>
+                    </small>
+                </div>
+
+                <div class="row">
+                    <div class="col">
+                        <div class="form-group">
+                            <label>Mode</label>
+                            <div class="mode-toggle">
+                                <button class="mode-btn active" onclick="setMode('fake', this)">🎭 Fake</button>
+                                <button class="mode-btn" onclick="setMode('redact', this)">🔒 Redact</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col" id="redact-options" style="display: none;">
+                        <div class="form-group">
+                            <label for="redact-style">Redaction Style</label>
+                            <select id="redact-style">
+                                <option value="full">Full: [REDACTED]</option>
+                                <option value="partial">Partial: XXXX-1234</option>
+                                <option value="token">Token: REDACTED_0001</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="seed">Random Seed (optional, for reproducibility)</label>
+                    <input type="number" id="seed" placeholder="Leave empty for random">
+                </div>
+
+                <button class="btn btn-primary" onclick="processFile()">🚀 Process File</button>
+            </div>
+
+            <div id="loading" class="loading">
+                <div class="spinner"></div>
+                <p>Processing your file...</p>
+            </div>
+
+            <div id="result-section" class="result-section">
+                <div class="info-box">
+                    ✅ Processing complete! Download your files below.
+                </div>
+                <div class="warning-box">
+                    ⚠️ <strong>Important:</strong> The mapping file contains real PII. Keep it secure and never send it to an LLM.
+                </div>
+                <div style="margin-top: 20px;">
+                    <a id="download-output" class="download-btn">📥 Download Processed File</a>
+                    <a id="download-mapping" class="download-btn">📥 Download Mapping</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Restore Tab -->
+        <div id="restore-tab" class="card hidden">
+            <h2 style="margin-bottom: 20px;">🔄 Restore Data</h2>
+
+            <div class="form-group">
+                <label>Upload File with Faked/Redacted Data</label>
+                <input type="file" id="restore-input" accept=".csv,.tsv,.xlsx,.xls,.json,.ndjson,.jsonl,.parquet,.txt">
+            </div>
+
+            <div class="form-group">
+                <label>Upload Mapping File</label>
+                <input type="file" id="restore-mapping" accept=".json,.db,.sqlite">
+            </div>
+
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="is-text"> This is free-form text (not tabular data)
+                </label>
+            </div>
+
+            <button class="btn btn-primary" onclick="restoreFile()">🔄 Restore Original Values</button>
+
+            <div id="restore-loading" class="loading">
+                <div class="spinner"></div>
+                <p>Restoring values...</p>
+            </div>
+
+            <div id="restore-result" class="result-section">
+                <div class="info-box">
+                    ✅ Restoration complete!
+                </div>
+                <div style="margin-top: 20px;">
+                    <a id="download-restored" class="download-btn">📥 Download Restored File</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentJobId = null;
+        let selectedColumns = new Set();
+        let currentMode = 'fake';
+
+        // File upload handling
+        const uploadZone = document.getElementById('upload-zone');
+        const fileInput = document.getElementById('file-input');
+
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                fileInput.files = e.dataTransfer.files;
+                handleFileSelect();
+            }
+        });
+
+        fileInput.addEventListener('change', handleFileSelect);
+
+        function handleFileSelect() {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            document.getElementById('filename').textContent = file.name;
+            document.getElementById('file-info').classList.remove('hidden');
+
+            // Detect PII columns
+            detectPII(file);
+        }
+
+        async function detectPII(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('match_strategy', 'normalized');
+            formData.append('extra_columns', '');
+            formData.append('override_defaults', false);
+
+            try {
+                const response = await fetch('/api/detect', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    currentJobId = data.job_id;
+                    displayDetections(data.detections);
+                } else {
+                    alert('Error: ' + (data.detail || 'Failed to detect PII'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        function displayDetections(detections) {
+            const container = document.getElementById('detections-list');
+            const noColumnsMsg = document.getElementById('no-columns-message');
+            container.innerHTML = '';
+            selectedColumns.clear();
+
+            const allColumns = Object.values(detections).flat();
+            console.log('Detected columns:', allColumns);
+
+            if (allColumns.length === 0) {
+                noColumnsMsg.classList.remove('hidden');
+            } else {
+                noColumnsMsg.classList.add('hidden');
+
+                // Separate flat and nested columns
+                const flatColumns = allColumns.filter(c => c.type === 'flat');
+                const nestedColumns = allColumns.filter(c => c.type !== 'flat');
+
+                // Display flat columns as tags
+                if (flatColumns.length > 0) {
+                    const flatSection = document.createElement('div');
+                    flatSection.innerHTML = '<h4 style="margin: 10px 0;">Flat Columns</h4>';
+                    const tagsDiv = document.createElement('div');
+                    tagsDiv.className = 'columns-list';
+
+                    flatColumns.forEach(col => {
+                        const tag = document.createElement('label');
+                        tag.className = 'column-tag selected';
+                        const checkboxHtml = '<input type="checkbox" checked ' +
+                            'data-path="' + col.path.replace(/"/g, '&quot;') + '" ' +
+                            'onchange="toggleColumn(this.dataset.path, this.checked)">';
+                        tag.innerHTML = checkboxHtml + ' ' + col.column +
+                            ' <span style="font-size: 0.8rem; opacity: 0.7">(' + col.category + ')</span>';
+                        tagsDiv.appendChild(tag);
+                        selectedColumns.add(col.path);
+                    });
+
+                    flatSection.appendChild(tagsDiv);
+                    container.appendChild(flatSection);
+                }
+
+                // Display nested columns as tree
+                if (nestedColumns.length > 0) {
+                    const nestedSection = document.createElement('div');
+                    nestedSection.innerHTML = '<h4 style="margin: 15px 0 10px 0;">Nested Columns</h4>';
+                    const treeDiv = document.createElement('div');
+                    treeDiv.className = 'tree-view';
+
+                    // Group by parent
+                    const grouped = {};
+                    nestedColumns.forEach(col => {
+                        const parent = col.parent || 'root';
+                        if (!grouped[parent]) grouped[parent] = [];
+                        grouped[parent].push(col);
+                    });
+
+                    Object.keys(grouped).forEach(parent => {
+                        // Parent header
+                        const parentDiv = document.createElement('div');
+                        parentDiv.className = 'tree-parent';
+                        parentDiv.textContent = parent;
+                        treeDiv.appendChild(parentDiv);
+
+                        // Children
+                        grouped[parent].forEach(col => {
+                            const item = document.createElement('div');
+                            item.className = 'tree-item selected';
+                            if (col.path.includes('[*]')) {
+                                item.classList.add('nested-deep');
+                            } else {
+                                item.classList.add('nested');
+                            }
+
+                            const checkbox = document.createElement('input');
+                            checkbox.type = 'checkbox';
+                            checkbox.checked = true;
+                            checkbox.dataset.path = col.path;
+                            checkbox.addEventListener('change', function() {
+                                toggleColumn(this.dataset.path, this.checked);
+                                item.classList.toggle('selected', this.checked);
+                            });
+
+                            const pathSpan = document.createElement('span');
+                            pathSpan.className = 'path';
+                            pathSpan.textContent = col.json_path || col.column;
+
+                            const categorySpan = document.createElement('span');
+                            categorySpan.className = 'category';
+                            categorySpan.textContent = col.category;
+
+                            const typeSpan = document.createElement('span');
+                            typeSpan.style.fontSize = '0.75rem';
+                            typeSpan.style.opacity = '0.7';
+                            typeSpan.textContent = `(${col.type})`;
+
+                            item.appendChild(checkbox);
+                            item.appendChild(pathSpan);
+                            item.appendChild(categorySpan);
+                            item.appendChild(typeSpan);
+                            treeDiv.appendChild(item);
+
+                            selectedColumns.add(col.path);
+                        });
+                    });
+
+                    nestedSection.appendChild(treeDiv);
+                    container.appendChild(nestedSection);
+                }
+            }
+
+            console.log('selectedColumns after display:', Array.from(selectedColumns));
+            document.getElementById('detection-section').classList.remove('hidden');
+        }
+
+        function toggleColumn(column, selected) {
+            console.log('toggleColumn called:', column, selected);
+            if (selected) {
+                selectedColumns.add(column);
+            } else {
+                selectedColumns.delete(column);
+            }
+            console.log('selectedColumns now:', Array.from(selectedColumns));
+        }
+
+        function setMode(mode, btn) {
+            currentMode = mode;
+            document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById('redact-options').style.display = mode === 'redact' ? 'block' : 'none';
+        }
+
+        async function processFile() {
+            console.log('processFile called, currentJobId:', currentJobId, 'selectedColumns:', Array.from(selectedColumns));
+
+            if (!currentJobId) {
+                alert('Please upload a file first');
+                return;
+            }
+
+            if (selectedColumns.size === 0) {
+                alert('No PII columns selected. Please select at least one column or add custom columns.');
+                return;
+            }
+
+            document.getElementById('loading').classList.add('visible');
+            document.getElementById('result-section').classList.remove('visible');
+
+            // Include extra columns from input
+            const extraColumns = document.getElementById('extra-columns').value;
+            const allColumns = Array.from(selectedColumns);
+            if (extraColumns) {
+                const extras = extraColumns.split(',').map(c => c.trim()).filter(c => c);
+                extras.forEach(col => {
+                    if (!allColumns.includes(col)) {
+                        allColumns.push(col);
+                    }
+                });
+            }
+
+            const formData = new FormData();
+            formData.append('job_id', currentJobId);
+            formData.append('selected_columns', allColumns.join(','));
+            formData.append('mode', currentMode);
+            formData.append('redact_style', document.getElementById('redact-style').value);
+
+            const seed = document.getElementById('seed').value;
+            if (seed) formData.append('seed', parseInt(seed));
+
+            try {
+                const response = await fetch('/api/process', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                const data = await response.json();
+
+                document.getElementById('loading').classList.remove('visible');
+
+                if (response.ok) {
+                    document.getElementById('download-output').href = `/api/download/${data.job_id}/output`;
+                    document.getElementById('download-mapping').href = `/api/download/${data.job_id}/mapping`;
+                    document.getElementById('result-section').classList.add('visible');
+                } else {
+                    alert('Error: ' + (data.detail || 'Processing failed'));
+                }
+            } catch (error) {
+                document.getElementById('loading').classList.remove('visible');
+                alert('Error: ' + error.message);
+            }
+        }
+
+        // Restore functionality
+        async function restoreFile() {
+            const inputFile = document.getElementById('restore-input').files[0];
+            const mappingFile = document.getElementById('restore-mapping').files[0];
+            const isText = document.getElementById('is-text').checked;
+
+            if (!inputFile || !mappingFile) {
+                alert('Please select both files');
+                return;
+            }
+
+            document.getElementById('restore-loading').classList.add('visible');
+            document.getElementById('restore-result').classList.remove('visible');
+
+            const formData = new FormData();
+            formData.append('input_file', inputFile);
+            formData.append('mapping_file', mappingFile);
+            formData.append('is_text', isText);
+
+            try {
+                const response = await fetch('/api/restore', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                const data = await response.json();
+
+                document.getElementById('restore-loading').classList.remove('visible');
+
+                if (response.ok) {
+                    document.getElementById('download-restored').href = `/download/restore/${data.job_id}`;
+                    document.getElementById('restore-result').classList.add('visible');
+                } else {
+                    alert('Error: ' + (data.detail || 'Restoration failed'));
+                }
+            } catch (error) {
+                document.getElementById('restore-loading').classList.remove('visible');
+                alert('Error: ' + error.message);
+            }
+        }
+
+        // Tab switching
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+
+            document.getElementById('process-tab').classList.toggle('hidden', tab !== 'process');
+            document.getElementById('restore-tab').classList.toggle('hidden', tab !== 'restore');
+        }
+    </script>
+</body>
+</html>

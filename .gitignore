@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# Mappings and local PII data (never commit real PII)
+mapping_*.json
+mapping_*.db
+mapping_*.sqlite
+*.pii.json
+~/.pii_toolkit/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

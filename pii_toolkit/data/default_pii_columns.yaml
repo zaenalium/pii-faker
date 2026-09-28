@@ -1,0 +1,68 @@
+# Default PII column patterns for detection
+# Each entry maps to a PII category for appropriate fake data generation
+
+columns:
+  # Name fields
+  - pattern: name
+    category: name
+    description: "General name field"
+
+  - pattern: patient_name
+    category: name
+    description: "Patient name"
+
+  - pattern: member_name
+    category: name
+    description: "Member name"
+
+  # Identifier fields
+  - pattern: patientcardnumber
+    category: identifier
+    description: "Patient card number"
+
+  - pattern: card_number
+    category: identifier
+    description: "Card number"
+
+  - pattern: card_no
+    category: identifier
+    description: "Card number (abbreviated)"
+
+  - pattern: member_code
+    category: identifier
+    description: "Member code"
+
+  - pattern: additional_member_code
+    category: identifier
+    description: "Additional member code"
+
+  # Contact fields
+  - pattern: phone
+    category: contact
+    description: "Phone number"
+
+  - pattern: store_phone
+    category: contact
+    description: "Store phone number"
+
+  - pattern: email
+    category: contact
+    description: "Email address"
+
+  # Address fields
+  - pattern: address
+    category: address
+    description: "Physical address"
+
+  # Date of birth fields
+  - pattern: date_of_birth
+    category: date
+    description: "Date of birth"
+
+  - pattern: birth_date
+    category: date
+    description: "Birth date"
+
+  - pattern: dob
+    category: date
+    description: "Date of birth (abbreviated)"
