@@ -40,6 +40,7 @@ class PIIConfig(BaseModel):
     override_defaults: bool = False
     json_columns: List[str] = Field(default_factory=list)
     strict_paths: bool = False
+    locale: Optional[str] = None
 
     infer_schema_length: Optional[int] = 100
     sheets: Optional[str] = None

@@ -47,6 +47,10 @@ class Target:
     description: str = ""
     json_path: str = ""  # for json_string: dotted path inside the JSON text
     dtype_name: Optional[str] = None
+    confidence: float = 1.0
+    name_match: bool = True
+    value_detector: Optional[str] = None
+    value_ratio: float = 0.0
 
 
 @dataclass
@@ -160,6 +164,11 @@ def plan_dataframe(
         has_explicit_nested = False
 
     flat_infos = {c["column"]: c for c in detector.detect(df)}
+    value_infos = {
+        c["column"]: c
+        for c in detector.detect_with_confidence(df)
+        if not c["name_match"]
+    }
     nested_infos = {
         p["path"]: p
         for p in detector.detect_nested_paths(
@@ -178,26 +187,45 @@ def plan_dataframe(
         if isinstance(dtype, (pl.Struct, pl.List)):
             continue
         info = flat_infos.get(col_name)
-        if info is None:
+        value_info = value_infos.get(col_name)
+        if info is None and value_info is None:
             continue
         if not _selected(col_name, col_name):
             continue
+        if info is not None:
+            category = info["category"]
+            pattern = info.get("pattern", "")
+            description = info.get("description", "")
+            confidence, name_match = 1.0, True
+            value_detector, value_ratio = None, 0.0
+        else:
+            category = value_info["category"]
+            pattern = value_info.get("pattern", "")
+            description = value_info.get("description", "")
+            confidence = value_info.get("confidence", 0.5)
+            name_match = False
+            value_detector = value_info.get("value_detector")
+            value_ratio = value_info.get("value_ratio", 0.0)
         if V.is_supported_leaf(dtype):
             plan.targets.append(Target(
                 kind="flat",
                 column=col_name,
                 path=col_name,
-                category=info["category"],
-                pattern=info.get("pattern", ""),
-                description=info.get("description", ""),
+                category=category,
+                pattern=pattern,
+                description=description,
                 dtype_name=V.dtype_name(dtype),
+                confidence=confidence,
+                name_match=name_match,
+                value_detector=value_detector,
+                value_ratio=value_ratio,
             ))
         else:
             plan.skipped.append({
                 "column": col_name,
                 "path": col_name,
                 "reason": f"unsupported dtype {dtype}; left unchanged",
-                "category": info["category"],
+                "category": category,
             })
 
     # Nested struct/list paths
@@ -500,30 +528,81 @@ def _transform_value(
     if isinstance(original, bool):
         return generator.generate_unique_fake(str(original), category, field_name)
     if isinstance(original, (int, float)):
-        text = str(original)
-        fake_text = generator.generate_unique_fake(text, category, field_name)
-        digits = "".join(c for c in fake_text if c.isdigit())
-        if not digits:
-            digits = "0"
-        try:
-            return int(digits) if isinstance(original, int) else float(digits or 0)
-        except ValueError:
-            return fake_text
+        return _unique_native_fake(
+            original, category, field_name, generator,
+            lambda text: _coerce_number(text, original),
+        )
     if isinstance(original, datetime.datetime):
-        text = original.isoformat()
-        fake_text = generator.generate_unique_fake(text, "date", field_name)
-        try:
-            return datetime.datetime.fromisoformat(fake_text)
-        except ValueError:
-            return original
+        return _unique_native_fake(
+            original, "date", field_name, generator,
+            lambda text: _coerce_datetime(text, original),
+        )
     if isinstance(original, datetime.date):
-        text = original.isoformat()
-        fake_text = generator.generate_unique_fake(text, "date", field_name)
-        try:
-            return datetime.date.fromisoformat(fake_text[:10])
-        except ValueError:
-            return original
+        return _unique_native_fake(
+            original, "date", field_name, generator,
+            lambda text: _coerce_date(text, original),
+        )
     return generator.generate_unique_fake(str(original), category, field_name)
+
+
+def _unique_native_fake(original, category, field_name, generator, coerce):
+    """Generate a fake whose coerced native value is unique across the run.
+
+    String-level uniqueness is not enough: different fake strings can coerce
+    to the same native value ('9' vs '009' -> 9). Claim str(coerced) so the
+    mapping stays bijective after coercion.
+    """
+    from pii_faker.core.generators import MAX_FAKE_ATTEMPTS
+
+    state = generator.run_state
+    state.register_originals([str(original)])
+    for _ in range(MAX_FAKE_ATTEMPTS):
+        fake_text = generator.generate_fake_value(str(original), category, field_name)
+        candidate = coerce(fake_text)
+        key = str(candidate)
+        if not key or key == str(original):
+            continue
+        if key in state.originals or key in state.used_fakes:
+            continue
+        state.used_fakes.add(key)
+        return candidate
+    state.warn(
+        f"faker retries exhausted for {original!r} ({category}); using suffixed fallback"
+    )
+    n = state.next_fallback()
+    if isinstance(original, int):
+        candidate = original + n
+    elif isinstance(original, float):
+        candidate = original + n * 0.5 + 0.25
+    else:
+        candidate = coerce(f"{original}#F{n}")
+    state.used_fakes.add(str(candidate))
+    state.fallbacks += 1
+    return candidate
+
+
+def _coerce_number(fake_text: str, original):
+    digits = "".join(c for c in fake_text if c.isdigit())
+    if not digits:
+        digits = "0"
+    try:
+        return int(digits) if isinstance(original, int) else float(digits or 0)
+    except ValueError:
+        return fake_text
+
+
+def _coerce_datetime(fake_text: str, original):
+    try:
+        return datetime.datetime.fromisoformat(fake_text)
+    except ValueError:
+        return original
+
+
+def _coerce_date(fake_text: str, original):
+    try:
+        return datetime.date.fromisoformat(fake_text[:10])
+    except ValueError:
+        return original
 
 
 def apply_plan(
@@ -888,7 +967,22 @@ def process_sheets(
     if mapping_out:
         mapper.save(mapping_out)
 
+    leak_reports = _leak_check_sheets(processed, mapper, single_scope)
+    for sheet_name, report in leak_reports.items():
+        if not report.clean:
+            run_state.warn(f"[{sheet_name}] {report.summary()}")
+
     return processed, mapper, run_state
+
+
+def _leak_check_sheets(processed, mapper, single_scope: bool):
+    """Leak-check processed sheets against the run mapper (never raises)."""
+    from pii_faker.core.leak_check import check_sheets_with_mapper
+
+    try:
+        return check_sheets_with_mapper(processed, mapper, single_scope)
+    except Exception:
+        return {}
 
 
 def restore_sheets(

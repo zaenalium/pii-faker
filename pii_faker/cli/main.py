@@ -76,6 +76,9 @@ def process(
     strict_paths: bool = typer.Option(
         False, "--strict-paths", help="Only match top-level fields in nested structures"
     ),
+    locale: Optional[str] = typer.Option(
+        None, "--locale", help="Faker locale for fake data (e.g., id_ID, en_US)"
+    ),
     sheets: Optional[str] = typer.Option(None, "--sheets", help="Excel sheets to process"),
     all_sheets: bool = typer.Option(False, "--all-sheets", help="Process all Excel sheets"),
     infer_schema_length: Optional[int] = typer.Option(
@@ -104,6 +107,7 @@ def process(
         override_defaults=override_defaults,
         json_columns=json_cols,
         strict_paths=strict_paths,
+        locale=locale,
         infer_schema_length=infer_schema_length if infer_schema_length != 0 else None,
         sheets=sheets,
         all_sheets=all_sheets,
@@ -137,13 +141,16 @@ def process(
                         'category': t.category,
                         'pattern': t.pattern,
                         'kind': t.kind,
+                        'confidence': t.confidence,
+                        'name_match': t.name_match,
+                        'value_detector': t.value_detector,
                     }
                     for t in plan.targets
                 ]
 
         # Dry run - just report findings
         if dry_run:
-            _print_dry_run(all_pii_columns, sheets_to_process)
+            _print_dry_run(all_pii_columns, sheets_to_process, config)
             raise typer.Exit()
 
         if not all_pii_columns:
@@ -198,6 +205,7 @@ def process(
 def _print_dry_run(
     all_pii_columns: dict,
     sheets: dict,
+    config=None,
 ):
     """Print dry run report."""
     table = Table(title="PII Detection Report (Dry Run)")
@@ -206,6 +214,8 @@ def _print_dry_run(
     table.add_column("Category", style="yellow")
     table.add_column("Pattern Match", style="blue")
     table.add_column("Kind", style="magenta")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Signal", style="dim")
     table.add_column("Unique Values", justify="right")
 
     for sheet_name, pii_cols in all_pii_columns.items():
@@ -216,12 +226,18 @@ def _print_dry_run(
                 unique_count = df[col_name].n_unique()
             except Exception:
                 unique_count = 0
+            if col_info.get('name_match', True):
+                signal = "name"
+            else:
+                signal = f"value:{col_info.get('value_detector', '?')}"
             table.add_row(
                 sheet_name,
                 col_info.get('path', col_name),
                 col_info['category'],
                 col_info['pattern'],
                 col_info.get('kind', 'flat'),
+                f"{col_info.get('confidence', 1.0):.2f}",
+                signal,
                 str(unique_count),
             )
 
@@ -237,6 +253,22 @@ def _print_dry_run(
                 pass
 
     console.print(f"\n[bold]Total unique PII values to process:[/bold] {total_unique}")
+
+    # Locale auto-suggestion (2.5)
+    from pii_faker.core.value_detectors import scan_frame_values, suggest_locale
+
+    all_columns: list = []
+    value_findings: dict = {}
+    for sheet_name, df in sheets.items():
+        all_columns.extend(df.columns)
+        for col, matches in scan_frame_values(df).items():
+            value_findings[f"{sheet_name}.{col}"] = matches
+    suggestion = suggest_locale(value_findings, all_columns)
+    if suggestion and suggestion != (config.locale or "en_US"):
+        console.print(
+            f"[yellow]Suggestion:[/yellow] Indonesian identifiers detected — "
+            f"consider [bold]--locale {suggestion}[/bold] for localised fakes."
+        )
 
 
 @app.command()

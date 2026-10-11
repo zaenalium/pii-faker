@@ -107,17 +107,22 @@ locally — 51 passed). Every README example runs as written in an end-to-end sm
 
 ### Phase 2: Detection that doesn't rely on column names (v0.4)
 *Goal: catch PII wherever it lives, and prove the output is clean.*
+*Status 2026-10-11: code items 2.1–2.5 complete, 67 tests green (51 + 16 new
+detection tests). 2.6 (optional NER extra) deferred as planned.*
 
-| ID | Task | Size | Notes |
-|----|------|------|-------|
-| 2.1 | Value-based detectors on a sample of rows: email, phone, credit card (Luhn), IBAN, IP, URL-with-credentials, plus Indonesian NIK (16 digits with region/date checks), NPWP and BPJS | M | Vectorised `str.contains` over a sample |
-| 2.2 | Confidence score per column (name match + value match ratio), shown in the CLI dry run and the GUI preview | S | |
-| 2.3 | **Leak check:** re-scan the output with 2.1 and fail or warn if residual PII is found; on by default in the GUI | M | |
-| 2.4 | Expand default column patterns (first/last/full name, mobile, NIK, NPWP, tanggal_lahir, alamat, …) and tighten fuzzy matching (token-based instead of character-set overlap) | S | Removes the `username`/`filename` false positives |
-| 2.5 | Faker locale option (`--locale id_ID`); auto-suggest it from detected identifiers | S | |
-| 2.6 | Optional free-text NER for names and addresses inside text columns (Presidio, spaCy or GLiNER) as an extra (`pip install pii-faker[nlp]`) | L | Keep it optional so the desktop bundle stays smaller |
+| ID | Task | Size | Notes | Status |
+|----|------|------|-------|--------|
+| 2.1 | Value-based detectors on a sample of rows: email, phone, credit card (Luhn), IBAN, IP, URL-with-credentials, plus Indonesian NIK (16 digits with region/date checks), NPWP and BPJS | M | Vectorised `str.contains` over a sample | 🟢 done (`core/value_detectors.py`: 9 detectors, Luhn + NIK plausibility, wired into `plan_dataframe` — value-only columns become targets) |
+| 2.2 | Confidence score per column (name match + value match ratio), shown in the CLI dry run and the GUI preview | S | | 🟢 done (`detect_with_confidence`: 0.5·name + 0.5·value; dry-run Confidence/Signal columns; GUI shows `category · conf · signal`) |
+| 2.3 | **Leak check:** re-scan the output with 2.1 and fail or warn if residual PII is found; on by default in the GUI | M | | 🟢 done (`core/leak_check.py`: original-value + value-shape scans, PII-free reports; runs in `process_sheets`, surfaces as CLI warnings + web `warnings`; verified: deselected column flagged, clean run silent) |
+| 2.4 | Expand default column patterns (first/last/full name, mobile, NIK, NPWP, tanggal_lahir, alamat, …) and tighten fuzzy matching (token-based instead of character-set overlap) | S | Removes the `username`/`filename` false positives | 🟢 done (15 → 34 patterns incl. Indonesian set; token-based fuzzy + `NON_PII_QUALIFIERS` guard — `username`/`filename`/`company_name` excluded, compounds still match) |
+| 2.5 | Faker locale option (`--locale id_ID`); auto-suggest it from detected identifiers | S | | 🟢 done (`PIIConfig.locale`, `--locale` + web `locale` field, `suggest_locale` in dry run + web `suggested_locale`) |
+| 2.6 | Optional free-text NER for names and addresses inside text columns (Presidio, spaCy or GLiNER) as an extra (`pip install pii-faker[nlp]`) | L | Keep it optional so the desktop bundle stays smaller | ⬜ deferred (as planned) |
 
 **Exit criteria:** the benchmark fixture with renamed columns and free-text notes is fully caught, and the leak check reports zero residual PII.
+Verified 2026-10-11: `col_7` (emails) and `notes` (phones) auto-detected via
+value shapes; `username`/`company_name`/`filename` excluded; leak check flags
+a deselected PII column and is silent on a clean run.
 
 ### Phase 3: Safety and accountability (v0.5)
 

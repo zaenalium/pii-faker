@@ -8,9 +8,9 @@ Package: `pii_faker/`, tests: `pii_faker/tests/`, entry: `pii_faker/cli/main.py`
 
 ## Source of truth
 `roadmap.md` §1 (ground-check findings D1–D13) and §2 (phased plan) drive all
-work. Phase 0 code items are COMPLETE as of 2026-10-11 (all 14 marked 🟢,
-51 tests green); remaining exit work is CI running green on all 3 OSes +
-README-example smoke test. Do not start Phase 1/2 without being asked.
+work. Phase 0 (all 14 items) and Phase 2 code items (2.1–2.5) are COMPLETE as
+of 2026-10-11, 67 tests green. 2.6 (optional NER) deferred as planned. Do not
+start Phase 1/3/4 without being asked.
 
 ## Verified Polars behaviors (don't re-derive; tested empirically)
 - `pl.field(name)` — not `pl.col(name)` — for relative refs inside
@@ -69,7 +69,20 @@ README-example smoke test. Do not start Phase 1/2 without being asked.
   error-path cleanup.
 - Tests: `tests/test_roundtrip.py` — 10 Hypothesis property tests
   (flat/multi-column/multi-sheet/nested/JSON-string/date/int/token/
-  typed-token/text). Full suite: 51 passed.
+  typed-token/text); `tests/test_detection.py` — 16 tests (value shapes,
+  Luhn/NIK vectors, confidence, fuzzy exclusions, leak check, locale).
+  Full suite: 67 passed.
+- Phase 2 additions: `core/value_detectors.py` (9 regex detectors over a
+  ≤500-row sample + Luhn + NIK plausibility + `suggest_locale`),
+  `core/leak_check.py` (original-value + value-shape re-scan, PII-free
+  reports, runs inside `process_sheets`), `Target.confidence/name_match/
+  value_detector`, `PIIConfig.locale` (`--locale`, web `locale` field),
+  34 default patterns (Indonesian set), token-based fuzzy with
+  `NON_PII_QUALIFIERS`.
+- Native-type uniqueness subtlety: string-level claiming is NOT enough
+  ('9' vs '009' → both int 9). `_unique_native_fake` claims str(coerced).
+- Suite runs in ~4s; if pytest ever hangs, suspect value-detector regexes
+  on large Hypothesis frames, not Polars.
 
 ## Conventions
 - Polars only, never pandas. Native expressions in hot paths; `map_elements`

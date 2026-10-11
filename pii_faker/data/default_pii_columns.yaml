@@ -7,6 +7,18 @@ columns:
     category: name
     description: "General name field"
 
+  - pattern: full_name
+    category: name
+    description: "Full name"
+
+  - pattern: first_name
+    category: name
+    description: "First name"
+
+  - pattern: last_name
+    category: name
+    description: "Last name"
+
   - pattern: patient_name
     category: name
     description: "Patient name"
@@ -14,6 +26,14 @@ columns:
   - pattern: member_name
     category: name
     description: "Member name"
+
+  - pattern: nama
+    category: name
+    description: "Name (Indonesian)"
+
+  - pattern: nama_lengkap
+    category: name
+    description: "Full name (Indonesian)"
 
   # Identifier fields
   - pattern: patientcardnumber
@@ -36,10 +56,46 @@ columns:
     category: identifier
     description: "Additional member code"
 
+  - pattern: nik
+    category: identifier
+    description: "Indonesian national ID (NIK)"
+
+  - pattern: no_ktp
+    category: identifier
+    description: "Indonesian ID card number"
+
+  - pattern: npwp
+    category: identifier
+    description: "Indonesian tax ID (NPWP)"
+
+  - pattern: no_bpjs
+    category: identifier
+    description: "Indonesian health insurance (BPJS)"
+
+  - pattern: bpjs
+    category: identifier
+    description: "Indonesian health insurance (BPJS)"
+
   # Contact fields
   - pattern: phone
     category: contact
     description: "Phone number"
+
+  - pattern: phone_number
+    category: contact
+    description: "Phone number (full)"
+
+  - pattern: mobile
+    category: contact
+    description: "Mobile number"
+
+  - pattern: no_hp
+    category: contact
+    description: "Mobile number (Indonesian)"
+
+  - pattern: no_telepon
+    category: contact
+    description: "Phone number (Indonesian)"
 
   - pattern: store_phone
     category: contact
@@ -54,6 +110,10 @@ columns:
     category: address
     description: "Physical address"
 
+  - pattern: alamat
+    category: address
+    description: "Address (Indonesian)"
+
   # Date of birth fields
   - pattern: date_of_birth
     category: date
@@ -66,3 +126,7 @@ columns:
   - pattern: dob
     category: date
     description: "Date of birth (abbreviated)"
+
+  - pattern: tanggal_lahir
+    category: date
+    description: "Date of birth (Indonesian)"

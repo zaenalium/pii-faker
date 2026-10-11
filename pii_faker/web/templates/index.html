@@ -617,8 +617,11 @@
                         const checkboxHtml = '<input type="checkbox" checked ' +
                             'data-path="' + col.path.replace(/"/g, '&quot;') + '" ' +
                             'onchange="toggleColumn(this.dataset.path, this.checked)">';
+                        const signal = col.name_match ? 'name' : ('value:' + (col.value_detector || '?'));
+                        const conf = (col.confidence != null ? col.confidence.toFixed(2) : '1.00');
                         tag.innerHTML = checkboxHtml + ' ' + col.column +
-                            ' <span style="font-size: 0.8rem; opacity: 0.7">(' + col.category + ')</span>';
+                            ' <span style="font-size: 0.8rem; opacity: 0.7">(' + col.category +
+                            ' · ' + conf + ' · ' + signal + ')</span>';
                         tagsDiv.appendChild(tag);
                         selectedColumns.add(col.path);
                     });
@@ -674,7 +677,9 @@
 
                             const categorySpan = document.createElement('span');
                             categorySpan.className = 'category';
-                            categorySpan.textContent = col.category;
+                            const nconf = (col.confidence != null ? col.confidence.toFixed(2) : '1.00');
+                            const nsignal = col.name_match ? 'name' : ('value:' + (col.value_detector || '?'));
+                            categorySpan.textContent = col.category + ' · ' + nconf + ' · ' + nsignal;
 
                             const typeSpan = document.createElement('span');
                             typeSpan.style.fontSize = '0.75rem';

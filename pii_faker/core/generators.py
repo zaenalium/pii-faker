@@ -24,7 +24,7 @@ class PIIGenerator:
     def __init__(self, config: PIIConfig, run_state: Optional[RunState] = None):
         self.config = config
         self.run_state = run_state or RunState()
-        self.fake = Faker()
+        self.fake = Faker(config.locale or "en_US")
         if config.seed is not None:
             self.fake.seed_instance(config.seed)
 

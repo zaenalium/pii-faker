@@ -4,7 +4,8 @@ A Python toolkit for detecting, faking, or redacting Personally Identifiable Inf
 
 ## Features
 
-- **PII Detection**: Automatically detects PII columns using configurable matching strategies (exact, normalized, fuzzy)
+- **PII Detection**: Automatically detects PII columns by name AND by value shape (emails, phones, credit cards, NIK/NPWP/BPJS, …), with confidence scores
+- **Leak check**: Re-scans processed output for residual PII and warns
 - **Fake Data Generation**: Generates realistic fake data preserving format and structure
 - **Redaction**: Multiple redaction styles (full, partial, token, typed-token)
 - **Reversible Mapping**: All transformations are reversible via mapping files (v2 format with native types, per-sheet scope, and session ID)
@@ -59,6 +60,10 @@ pii-faker process data.csv --output processed.csv --dry-run
 # Reproducible fakes + custom matching
 pii-faker process data.csv --output processed.csv --mapping-out mapping.json \
   --seed 42 --match-strategy fuzzy --extra-pii-columns "ssn,dob" --override-defaults
+
+# Indonesian data with localised fakes
+pii-faker process data.csv --output processed.csv --mapping-out mapping.json \
+  --locale id_ID
 
 # Excel sheets and JSON schema sampling
 pii-faker process data.xlsx --output processed.xlsx --mapping-out mapping.json \
@@ -154,7 +159,7 @@ Bare names like `email` match at any depth by default. Use `--strict-paths` for 
 
 ### Default PII Columns
 
-Built-in patterns include: `name`, `patient_name`, `member_name`, `phone`, `email`, `address`, `card_number`, `member_code`, etc.
+Built-in patterns include: `name`, `first_name`, `full_name`, `patient_name`, `member_name`, `nama`, `phone`, `mobile`, `email`, `address`, `alamat`, `card_number`, `member_code`, `nik`, `npwp`, `bpjs`, `tanggal_lahir`, etc.
 
 ### Custom Columns
 
@@ -176,7 +181,17 @@ Custom columns are stored in `~/.pii_faker/config.yaml`.
 
 - **exact**: Column name must match exactly
 - **normalized** (default): Case-insensitive, ignores spaces/underscores/hyphens
-- **fuzzy**: Substring and similarity matching
+- **fuzzy**: Token-based matching (no more `username`/`filename` false positives)
+
+### Value-based detection
+
+Even when column names reveal nothing (`col_7`, `notes`), values are sampled
+(up to 500 rows) and matched against email, phone, credit-card (Luhn-checked),
+IBAN, IPv4, URL-with-credentials, NIK (plausibility-checked), NPWP and BPJS
+shapes. Every target gets a confidence score (`0.5·name + 0.5·value`), shown
+in `--dry-run` and the web preview. Processed output is automatically
+re-scanned (leak check) — any surviving original value or unprocessed
+PII-shaped column is reported as a warning.
 
 ## File Formats
 

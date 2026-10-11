@@ -13,10 +13,18 @@ import polars as pl
 import yaml
 
 from pii_faker.core.config import PIIConfig, MatchStrategy
+from pii_faker.core.value_detectors import detect_value_shapes
 
 
 # Type alias for PII column info
 PIIColumnInfo = Dict[str, Any]
+
+# Column-name tokens that mark a multi-token name as organisational rather
+# than personal (roadmap 2.4: `company_name` must not fuzzy-match `name`).
+NON_PII_QUALIFIERS = frozenset({
+    "company", "companies", "corporate", "business", "employer",
+    "organisation", "organization", "firm",
+})
 
 
 def _normalize_name(name: str) -> str:
@@ -86,23 +94,29 @@ class PIIColumnDetector:
         return None
 
     def _match_fuzzy(self, col_name: str, threshold: float = 0.8) -> Optional[Dict[str, Any]]:
-        """Fuzzy match: use simple substring and similarity matching."""
-        normalized_col = _normalize_name(col_name)
+        """Fuzzy match: token-based matching against pattern token sets."""
+        tokens = set(re.findall(r"[a-z0-9]+", col_name.lower()))
+        if not tokens:
+            return None
+        if len(tokens) > 1 and tokens & NON_PII_QUALIFIERS:
+            return None
 
+        best: Optional[Dict[str, Any]] = None
+        best_score = 0.0
         for pattern in self._compiled_patterns:
-            normalized_pattern = pattern['normalized']
+            pattern_tokens = set(re.findall(r"[a-z0-9]+", pattern["original"].lower()))
+            if not pattern_tokens:
+                continue
+            overlap = tokens & pattern_tokens
+            if not overlap:
+                continue
+            score = len(overlap) / len(pattern_tokens)
+            if score > best_score:
+                best_score = score
+                best = pattern
 
-            # Check if pattern is contained in column name or vice versa
-            if normalized_pattern in normalized_col or normalized_col in normalized_pattern:
-                return pattern
-
-            # Simple character overlap ratio
-            if len(normalized_col) > 0 and len(normalized_pattern) > 0:
-                common = set(normalized_col) & set(normalized_pattern)
-                ratio = len(common) / max(len(set(normalized_col)), len(set(normalized_pattern)))
-                if ratio >= threshold:
-                    return pattern
-
+        if best is not None and best_score >= threshold:
+            return best
         return None
 
     def _match_column(self, col_name: str) -> Optional[Dict[str, Any]]:
@@ -141,6 +155,56 @@ class PIIColumnDetector:
                 })
 
         return pii_columns
+
+    def detect_with_confidence(
+        self,
+        df: pl.DataFrame,
+        sample_size: int = 500,
+        min_value_ratio: float = 0.3,
+    ) -> List[PIIColumnInfo]:
+        """
+        Detect PII columns with confidence scores (roadmap 2.2).
+
+        Confidence combines the name signal (1.0 for an explicit match,
+        0.0 otherwise) with the best value-shape ratio:
+
+            confidence = 0.5 * name_hit + 0.5 * value_ratio
+
+        Columns are included when they match by name OR when a value
+        detector fires at min_value_ratio. Results are sorted by
+        confidence descending.
+        """
+        from pii_faker.core.value_detectors import MIN_RATIO
+
+        findings: List[PIIColumnInfo] = []
+        for col_name in df.columns:
+            match = self._match_column(col_name)
+            value_hits = detect_value_shapes(
+                df[col_name], min_value_ratio, sample_size
+            )
+            best_ratio = max((h["ratio"] for h in value_hits), default=0.0)
+            best_hit = max(value_hits, key=lambda h: h["ratio"], default=None)
+
+            if match is None and not value_hits:
+                continue
+            if match is None and best_ratio < max(min_value_ratio, MIN_RATIO):
+                continue
+
+            confidence = 0.5 * (1.0 if match else 0.0) + 0.5 * best_ratio
+            category = match["category"] if match else best_hit["category"]
+            findings.append({
+                "column": col_name,
+                "category": category,
+                "pattern": match["original"] if match else f"value:{best_hit['detector']}",
+                "description": match["description"] if match else best_hit["description"],
+                "confidence": round(confidence, 3),
+                "name_match": bool(match),
+                "value_detector": best_hit["detector"] if best_hit else None,
+                "value_ratio": round(best_ratio, 3),
+            })
+
+        findings.sort(key=lambda f: f["confidence"], reverse=True)
+        return findings
 
     def detect_nested_paths(
         self,

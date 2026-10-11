@@ -110,6 +110,10 @@ async def detect_pii(
                     "path": t.path,
                     "parent": t.column if dtype != "flat" else None,
                     "json_path": t.json_path or None,
+                    "confidence": t.confidence,
+                    "name_match": t.name_match,
+                    "value_detector": t.value_detector,
+                    "value_ratio": t.value_ratio,
                 })
             all_detections[sheet_name] = detections
 
@@ -122,10 +126,21 @@ async def detect_pii(
             "sheets": list(all_detections.keys()),
         }
 
+        # Locale auto-suggestion (2.5)
+        from pii_faker.core.value_detectors import scan_frame_values, suggest_locale
+
+        all_columns: list = []
+        value_findings: dict = {}
+        for sheet_name, df in sheets.items():
+            all_columns.extend(df.columns)
+            for col, matches in scan_frame_values(df).items():
+                value_findings[f"{sheet_name}.{col}"] = matches
+
         return JSONResponse({
             "job_id": job_id,
             "detections": all_detections,
             "filename": filename,
+            "suggested_locale": suggest_locale(value_findings, all_columns),
         })
 
     except HTTPException:
@@ -174,6 +189,7 @@ async def process_file(
     mode: str = Form("fake"),
     redact_style: str = Form("full"),
     seed: Optional[int] = Form(None),
+    locale: Optional[str] = Form(None),
 ):
     """Process file with selected PII columns (single pipeline)."""
     if job_id not in jobs:
@@ -192,6 +208,8 @@ async def process_file(
         config.mode = PIIMode(mode)
         config.redact_style = RedactionStyle(redact_style)
         config.seed = seed
+        if locale:
+            config.locale = locale
 
         # Read file
         file_handler = FileHandler(config)
