@@ -3,6 +3,7 @@ Configuration models for PII Faker.
 """
 
 from enum import Enum
+from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel, Field
 
@@ -18,6 +19,7 @@ class RedactionStyle(str, Enum):
     FULL = "full"
     PARTIAL = "partial"
     TOKEN = "token"
+    TYPED_TOKEN = "typed-token"
 
 
 class MatchStrategy(str, Enum):
@@ -29,7 +31,6 @@ class MatchStrategy(str, Enum):
 
 class PIIConfig(BaseModel):
     """Main configuration for PII processing."""
-
     mode: PIIMode = PIIMode.FAKE
     redact_style: RedactionStyle = RedactionStyle.FULL
     match_strategy: MatchStrategy = MatchStrategy.NORMALIZED
@@ -45,3 +46,34 @@ class PIIConfig(BaseModel):
     all_sheets: bool = False
 
     model_config = {"use_enum_values": True}
+
+
+DEFAULT_CONFIG_PATH = Path.home() / ".pii_faker" / "config.yaml"
+
+
+def load_user_extra_columns(config_path: Optional[str] = None) -> List[str]:
+    """Load user-defined extra PII columns from ~/.pii_faker/config.yaml."""
+    import yaml
+
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return []
+    columns = data.get("extra_pii_columns", [])
+    return [c for c in columns if isinstance(c, str) and c.strip()]
+
+
+def with_user_columns(config: "PIIConfig", config_path: Optional[str] = None) -> "PIIConfig":
+    """Return a copy of config with user columns merged into extra_pii_columns."""
+    user_cols = load_user_extra_columns(config_path)
+    if not user_cols:
+        return config
+    merged = list(config.extra_pii_columns or [])
+    for col in user_cols:
+        if col not in merged:
+            merged.append(col)
+    return config.model_copy(update={"extra_pii_columns": merged})

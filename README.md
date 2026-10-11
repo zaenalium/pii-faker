@@ -6,8 +6,8 @@ A Python toolkit for detecting, faking, or redacting Personally Identifiable Inf
 
 - **PII Detection**: Automatically detects PII columns using configurable matching strategies (exact, normalized, fuzzy)
 - **Fake Data Generation**: Generates realistic fake data preserving format and structure
-- **Redaction**: Multiple redaction styles (full, partial, token)
-- **Reversible Mapping**: All transformations are reversible via mapping files
+- **Redaction**: Multiple redaction styles (full, partial, token, typed-token)
+- **Reversible Mapping**: All transformations are reversible via mapping files (v2 format with native types, per-sheet scope, and session ID)
 - **Multiple Formats**: Supports CSV, Excel, JSON, NDJSON, Parquet
 - **Nested JSON**: Full support for nested structures and JSON paths
 - **CLI & Web UI**: Command-line interface and web-based interface
@@ -33,6 +33,9 @@ pii-faker process data.csv --output processed.csv --mapping-out mapping.json
 
 # Redact PII with partial style
 pii-faker process data.xlsx --mode redact --redact-style partial --output redacted.xlsx --mapping-out mapping.json
+
+# Redact with globally unique typed tokens (best default before an LLM)
+pii-faker process data.csv --mode redact --redact-style typed-token --output tok.csv --mapping-out mapping.json
 
 # Process nested JSON with explicit paths
 pii-faker process data.ndjson \
@@ -109,11 +112,15 @@ pii-faker serve --port 8000
 ```
 
 Open http://localhost:8000 in your browser to:
-1. Upload files
-2. Preview detected PII columns
+1. Upload files (500 MB cap; filenames are sanitised)
+2. Preview detected PII columns (flat, nested, and JSON-string leaves)
 3. Select columns to process
 4. Choose fake or redact mode
-5. Download processed files and mapping
+5. Download processed files and mapping (server temp files are deleted after download)
+
+> Note: the web UI runs on localhost only and is designed for a single
+> trusted user. Uploaded originals and plaintext mappings live in a temp
+> directory until you download the results, then are deleted.
 
 ## JSON & Nested JSON Support
 
@@ -175,10 +182,10 @@ Custom columns are stored in `~/.pii_faker/config.yaml`.
 
 | Format | Read | Write | Notes |
 |--------|------|-------|-------|
-| CSV/TSV | ✓ | ✓ | Lazy streaming supported |
-| Excel | ✓ | ✓ | Uses calamine (fastexcel) for reads |
+| CSV/TSV | ✓ | ✓ | Eager reads today (`read_lazy` exists but the pipeline reads eagerly) |
+| Excel | ✓ | ✓ | Uses calamine (fastexcel) for reads; multi-sheet writes go to sibling files (`output_Sheet1.xlsx`) |
 | JSON | ✓ | ✓ | Schema inference configurable |
-| NDJSON/JSONL | ✓ | ✓ | Lazy streaming supported |
+| NDJSON/JSONL | ✓ | ✓ | Eager reads today |
 | Parquet | ✓ | ✓ | Best for large datasets |
 
 ## Security Model
@@ -186,15 +193,19 @@ Custom columns are stored in `~/.pii_faker/config.yaml`.
 ### Where Mappings Live
 
 - Mapping files are stored locally and never sent to the LLM
-- Default location: current directory or `~/.pii_faker/mappings/`
+- Save them wherever you like via `--mapping-out`; there is no automatic default directory
 - JSON (`.json`, small mappings) and SQLite (`.db`/`.sqlite`, large mappings) formats — chosen by `--mapping-out` extension
+- Mappings are v2: native value types, per-sheet scope, session ID, and tool version. Version 1 files still load.
+
+> Note: SQLite changes only the file format, not memory use — the full
+> mapping is still loaded into memory to save and to restore.
 
 ### What's in Mappings
 
-- Original → replacement value pairs
-- Source column/path for each mapping
+- Original → replacement value pairs (native types preserved: int, date, …)
+- Source column/path and sheet scope for each mapping
 - Processing mode and configuration used
-- Timestamp and session ID
+- Timestamp, tool version, and session ID
 
 ### Cleanup Guidance
 
@@ -248,8 +259,9 @@ pytest pii_faker/tests/test_core.py
 
 - Excel is inherently the slowest format; prefer CSV/NDJSON for large exports
 - Fuzzy matching may produce false positives on unrelated columns
-- Very large mappings (>100k entries) may impact restore performance
-- `redact --redact-style full/partial` is not exactly reversible (many-to-one placeholders); use `fake` or `token` when lossless restore matters
+- Very large mappings (>100k entries) load fully into memory on save and restore, including SQLite mappings
+- `redact --redact-style full/partial` is not exactly reversible (many-to-one placeholders); use `fake`, `token`, or `typed-token` when lossless restore matters
+- Non-string columns (int, date, …) are faked with native-type fakes; columns with unsupported dtypes are skipped with a warning
 
 ### Next Steps
 

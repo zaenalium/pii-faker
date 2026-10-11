@@ -49,6 +49,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "pytest-benchmark>=4.0.0",
     "httpx>=0.25.0",
+    "hypothesis>=6.0.0",
 ]
 
 [project.scripts]

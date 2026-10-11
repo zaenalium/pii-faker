@@ -15,12 +15,14 @@ from rich.table import Table
 from rich import print as rprint
 
 from pii_faker.core.config import PIIConfig, PIIMode, RedactionStyle, MatchStrategy
-from pii_faker.core.detector import PIIColumnDetector
-from pii_faker.core.generators import PIIGenerator
-from pii_faker.core.redactor import PIIRedactor
 from pii_faker.core.mapper import PIIMapper
 from pii_faker.core.restorer import PIIRestorer
 from pii_faker.core.file_io import FileHandler
+from pii_faker.core.pipeline import (
+    detect_targets,
+    process_sheets,
+    restore_sheets,
+)
 
 app = typer.Typer(
     name="pii-faker",
@@ -114,20 +116,30 @@ def process(
 
         data = file_handler.read(input_file, sheets=sheets, all_sheets=all_sheets)
 
-        # Handle multiple sheets
+        # Handle multiple sheets (single pipeline: shared RunState + scoped mapper)
         if isinstance(data, dict):
             sheets_to_process = data
         else:
             sheets_to_process = {"default": data}
 
-        # Detect PII columns
-        detector = PIIColumnDetector(config)
+        # Detect PII targets via the pipeline plan (flat + nested + JSON-string)
         all_pii_columns = {}
+        all_plans = {}
 
         for sheet_name, df in sheets_to_process.items():
-            pii_cols = detector.detect(df)
-            if pii_cols:
-                all_pii_columns[sheet_name] = pii_cols
+            plan = detect_targets(df, config)
+            all_plans[sheet_name] = plan
+            if plan.targets:
+                all_pii_columns[sheet_name] = [
+                    {
+                        'column': t.column,
+                        'path': t.path,
+                        'category': t.category,
+                        'pattern': t.pattern,
+                        'kind': t.kind,
+                    }
+                    for t in plan.targets
+                ]
 
         # Dry run - just report findings
         if dry_run:
@@ -139,34 +151,20 @@ def process(
             if not typer.confirm("Continue without processing?"):
                 raise typer.Abort()
 
-        # Process each sheet
-        mapper = PIIMapper(config)
-        processed_sheets = {}
-
+        # Process all sheets through the single pipeline
         for sheet_name, df in sheets_to_process.items():
-            pii_cols = all_pii_columns.get(sheet_name, [])
-            if not pii_cols:
-                processed_sheets[sheet_name] = df
-                continue
-
-            console.print(f"[bold]Processing[/bold] sheet '{sheet_name}'...")
-
-            if config.mode == PIIMode.FAKE:
-                generator = PIIGenerator(config)
-                for col_info in pii_cols:
-                    df, col_mapping = generator.process_column(df, col_info)
-                    mapper.add_column_mapping(
-                        col_info['column'], col_info['category'], col_mapping
-                    )
-            else:
-                redactor = PIIRedactor(config)
-                for col_info in pii_cols:
-                    df, col_mapping = redactor.process_column(df, col_info)
-                    mapper.add_column_mapping(
-                        col_info['column'], col_info['category'], col_mapping
-                    )
-
-            processed_sheets[sheet_name] = df
+            plan = all_plans[sheet_name]
+            if plan.targets:
+                kinds = sorted({t.kind for t in plan.targets})
+                console.print(
+                    f"[bold]Processing[/bold] sheet '{sheet_name}' "
+                    f"({len(plan.targets)} targets: {', '.join(kinds)})..."
+                )
+        processed_sheets, mapper, run_state = process_sheets(
+            sheets_to_process, config
+        )
+        for warning in dict.fromkeys(run_state.warnings):
+            console.print(f"[yellow]Warning:[/yellow] {warning}")
 
         # Write output
         console.print(f"[bold]Writing[/bold] {output}...")
@@ -204,21 +202,26 @@ def _print_dry_run(
     """Print dry run report."""
     table = Table(title="PII Detection Report (Dry Run)")
     table.add_column("Sheet", style="cyan")
-    table.add_column("Column", style="green")
+    table.add_column("Target", style="green")
     table.add_column("Category", style="yellow")
     table.add_column("Pattern Match", style="blue")
+    table.add_column("Kind", style="magenta")
     table.add_column("Unique Values", justify="right")
 
     for sheet_name, pii_cols in all_pii_columns.items():
         df = sheets[sheet_name]
         for col_info in pii_cols:
             col_name = col_info['column']
-            unique_count = df[col_name].n_unique()
+            try:
+                unique_count = df[col_name].n_unique()
+            except Exception:
+                unique_count = 0
             table.add_row(
                 sheet_name,
-                col_name,
+                col_info.get('path', col_name),
                 col_info['category'],
                 col_info['pattern'],
+                col_info.get('kind', 'flat'),
                 str(unique_count),
             )
 
@@ -228,7 +231,10 @@ def _print_dry_run(
     for sheet_name, pii_cols in all_pii_columns.items():
         df = sheets[sheet_name]
         for col_info in pii_cols:
-            total_unique += df[col_info['column']].n_unique()
+            try:
+                total_unique += df[col_info['column']].n_unique()
+            except Exception:
+                pass
 
     console.print(f"\n[bold]Total unique PII values to process:[/bold] {total_unique}")
 
@@ -260,7 +266,7 @@ def restore(
             with open(output, 'w') as f:
                 f.write(restored_text)
         else:
-            # Handle tabular/JSON data
+            # Handle tabular/JSON data (scope-aware restore)
             file_handler = FileHandler(mapper.config)
             console.print(f"[bold]Reading[/bold] {input_file}...")
 
@@ -269,11 +275,11 @@ def restore(
             if isinstance(df, dict):
                 # Multiple sheets
                 output_path = Path(output)
-                for sheet_name, sheet_df in df.items():
+                restored = restore_sheets(df, mapper)
+                for sheet_name, restored_df in restored.items():
                     sheet_output = str(
                         output_path.with_name(f"{output_path.stem}_{sheet_name}{output_path.suffix}")
                     )
-                    restored_df = restorer.restore_dataframe(sheet_df)
                     file_handler.write(restored_df, sheet_output)
             else:
                 console.print("[bold]Restoring[/bold] values...")

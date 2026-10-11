@@ -2,23 +2,28 @@
 PII fake data generation module.
 
 Generates realistic fake data based on PII category.
-Uses the unique-values-first approach for performance.
+Uses the unique-values-first approach for performance, with per-run
+uniqueness enforcement so fake mode stays exactly reversible.
 """
 
 from typing import Dict, Any, Optional, Tuple
-from functools import lru_cache
 
 import polars as pl
 from faker import Faker
 
 from pii_faker.core.config import PIIConfig
+from pii_faker.core.state import RunState
+
+MAX_FAKE_ATTEMPTS = 50
+MAX_FALLBACK_IDS = 4_294_967_296
 
 
 class PIIGenerator:
     """Generates fake PII data based on category."""
 
-    def __init__(self, config: PIIConfig):
+    def __init__(self, config: PIIConfig, run_state: Optional[RunState] = None):
         self.config = config
+        self.run_state = run_state or RunState()
         self.fake = Faker()
         if config.seed is not None:
             self.fake.seed_instance(config.seed)
@@ -29,76 +34,66 @@ class PIIGenerator:
 
     def _generate_identifier(self, original: str) -> str:
         """Generate a fake identifier preserving format."""
-        # Preserve length and digit pattern
         result = []
         for char in original:
             if char.isdigit():
                 result.append(str(self.fake.random_digit()))
             else:
                 result.append(char)
-        return ''.join(result)
+        return "".join(result)
 
     def _generate_contact(self, original: str, field_name: str = "") -> str:
         """Generate fake contact info based on field name hints."""
         field_lower = field_name.lower()
 
-        if 'email' in field_lower or '@' in original:
+        if "email" in field_lower or "@" in original:
             return self.fake.email()
-        elif 'phone' in field_lower or any(c.isdigit() for c in original):
-            # Preserve phone-like format
+        elif "phone" in field_lower or any(c.isdigit() for c in original):
             result = []
             for char in original:
                 if char.isdigit():
                     result.append(str(self.fake.random_digit()))
                 else:
                     result.append(char)
-            return ''.join(result)
+            return "".join(result)
         else:
             return self.fake.phone_number()
 
     def _generate_address(self, original: str) -> str:
         """Generate a fake address."""
-        return self.fake.address().replace('\n', ', ')
+        return self.fake.address().replace("\n", ", ")
 
     def _generate_date(self, original: str) -> str:
         """Generate a fake date preserving format."""
-        # Detect common date formats
         import re
 
-        # Try to detect separator and format
-        if '/' in original:
-            sep = '/'
-        elif '-' in original:
-            sep = '-'
-        elif '.' in original:
-            sep = '.'
+        if "/" in original:
+            sep = "/"
+        elif "-" in original:
+            sep = "-"
+        elif "." in original:
+            sep = "."
         else:
-            sep = '-'
+            sep = "-"
 
-        parts = re.split(r'[/\-.]', original)
+        parts = re.split(r"[/\-.]", original)
 
-        # Generate fake date
         fake_date = self.fake.date_of_birth(minimum_age=18, maximum_age=90)
 
         if len(parts) == 3:
-            # Determine format (YMD, DMY, MDY)
             if len(parts[0]) == 4:
-                # YYYY-MM-DD
                 return f"{fake_date.year}{sep}{fake_date.month:02d}{sep}{fake_date.day:02d}"
             elif int(parts[0]) > 12:
-                # DD-MM-YYYY
                 return f"{fake_date.day:02d}{sep}{fake_date.month:02d}{sep}{fake_date.year}"
             else:
-                # MM-DD-YYYY
                 return f"{fake_date.month:02d}{sep}{fake_date.day:02d}{sep}{fake_date.year}"
 
-        # Fallback: return in same format
-        return fake_date.strftime('%Y-%m-%d')
+        return fake_date.strftime("%Y-%m-%d")
 
     def _generate_generic(self, original: str) -> str:
         """Generate a generic fake value preserving type."""
         if original.isdigit():
-            return ''.join(str(self.fake.random_digit()) for _ in original)
+            return "".join(str(self.fake.random_digit()) for _ in original)
         elif any(c.isdigit() for c in original):
             result = []
             for char in original:
@@ -108,7 +103,7 @@ class PIIGenerator:
                     result.append(self.fake.random_letter())
                 else:
                     result.append(char)
-            return ''.join(result)
+            return "".join(result)
         else:
             return self.fake.word()
 
@@ -125,15 +120,53 @@ class PIIGenerator:
             Generated fake value
         """
         generators = {
-            'name': lambda: self._generate_name(original),
-            'identifier': lambda: self._generate_identifier(original),
-            'contact': lambda: self._generate_contact(original, field_name),
-            'address': lambda: self._generate_address(original),
-            'date': lambda: self._generate_date(original),
+            "name": lambda: self._generate_name(original),
+            "identifier": lambda: self._generate_identifier(original),
+            "contact": lambda: self._generate_contact(original, field_name),
+            "address": lambda: self._generate_address(original),
+            "date": lambda: self._generate_date(original),
         }
 
         generator = generators.get(category, lambda: self._generate_generic(original))
         return generator()
+
+    def _claim_unique(self, candidate: str, originals: set, original: str) -> bool:
+        """Claim a fake candidate if unused and safe. Returns True on success."""
+        if not candidate or candidate == original:
+            return False
+        if candidate in originals:
+            return False
+        if candidate in self.run_state.used_fakes:
+            return False
+        self.run_state.used_fakes.add(candidate)
+        return True
+
+    def _fallback_fake(self, original: str, category: str) -> str:
+        """Deterministic non-colliding fallback when retries are exhausted."""
+        seed_base = f"{category}:{original}"
+        while True:
+            n = self.run_state.next_fallback()
+            if n > MAX_FALLBACK_IDS:
+                raise ValueError(
+                    f"Could not generate a unique fake for {original!r} "
+                    f"(category {category!r}): fallback space exhausted"
+                )
+            candidate = f"{seed_base}#F{n}"
+            if self._claim_unique(candidate, self.run_state.originals, original):
+                self.run_state.fallbacks += 1
+                return candidate
+
+    def generate_unique_fake(self, original: str, category: str, field_name: str = "") -> str:
+        """Generate a fake that is unique across the run and differs from any original."""
+        originals = self.run_state.originals
+        for _ in range(MAX_FAKE_ATTEMPTS):
+            candidate = self.generate_fake_value(original, category, field_name)
+            if self._claim_unique(candidate, originals, original):
+                return candidate
+        self.run_state.warn(
+            f"faker retries exhausted for {original!r} ({category}); using suffixed fallback"
+        )
+        return self._fallback_fake(original, category)
 
     def build_mapping(
         self,
@@ -147,7 +180,7 @@ class PIIGenerator:
         Uses unique-values-first approach for performance:
         1. Get unique non-null values
         2. Sort them for consistent ordering
-        3. Generate fakes only for unique values
+        3. Generate unique fakes only for unique values
         4. Return mapping dict
 
         Args:
@@ -158,16 +191,13 @@ class PIIGenerator:
         Returns:
             Dict mapping original -> fake
         """
-        # Get unique non-null values and sort for consistent ordering.
-        # key=str keeps mixed-type columns (str + int) from raising TypeError.
         unique_values = sorted(series.drop_nulls().unique().to_list(), key=str)
+        self.run_state.register_originals(unique_values)
 
-        # Build mapping for unique values only
         mapping = {}
         for original in unique_values:
             if isinstance(original, str):
-                fake_value = self.generate_fake_value(original, category, field_name)
-                mapping[original] = fake_value
+                mapping[original] = self.generate_unique_fake(original, category, field_name)
 
         return mapping
 
@@ -186,19 +216,15 @@ class PIIGenerator:
         Returns:
             Tuple of (modified DataFrame, mapping dict)
         """
-        col_name = column_info['column']
-        category = column_info['category']
+        col_name = column_info["column"]
+        category = column_info["category"]
 
-        # Build mapping from unique values
         mapping = self.build_mapping(df[col_name], category, col_name)
 
         if not mapping:
             return df, {}
 
-        # Apply mapping using replace (vectorized, no row-wise UDF)
-        df = df.with_columns(
-            pl.col(col_name).replace(mapping).alias(col_name)
-        )
+        df = df.with_columns(pl.col(col_name).replace(mapping).alias(col_name))
 
         return df, mapping
 
@@ -225,8 +251,8 @@ class FakeDataGenerator:
 
     def generate_addresses(self, n: int) -> list:
         """Generate n fake addresses."""
-        return [self.fake.address().replace('\n', ', ') for _ in range(n)]
+        return [self.fake.address().replace("\n", ", ") for _ in range(n)]
 
     def generate_identifiers(self, n: int, length: int = 10) -> list:
         """Generate n fake identifiers of given length."""
-        return [self.fake.numerify('#' * length) for _ in range(n)]
+        return [self.fake.numerify("#" * length) for _ in range(n)]

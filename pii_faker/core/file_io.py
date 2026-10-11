@@ -88,8 +88,11 @@ class FileHandler:
     ) -> Union[pl.DataFrame, Dict[str, pl.DataFrame]]:
         """Read Excel file. Returns dict if multiple sheets."""
         if all_sheets:
-            # Read all sheets
-            sheet_names = pl.read_excel(path, sheet_name=None).keys()
+            # Read all sheets (sheet_name=None returns one DataFrame in
+            # current Polars, so discover names via fastexcel first).
+            import fastexcel
+
+            sheet_names = fastexcel.read_excel(path).sheet_names
             return {
                 name: pl.read_excel(path, sheet_name=name, engine='calamine')
                 for name in sheet_names
