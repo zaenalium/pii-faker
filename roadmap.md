@@ -88,20 +88,25 @@ locally — 51 passed). Every README example runs as written in an end-to-end sm
 
 ### Phase 1: Desktop app for macOS and Windows (v0.3)
 *Goal: double-click installers that run fully offline. Uses Option A: a native window (pywebview) around the bundled FastAPI app.*
+*Status 2026-10-11: 1.1–1.6 done and verified on this arm64 Mac; 1.7 build
+matrix present; 1.8 signing deferred (needs accounts); 1.9 WebView2 check
+present.*
 
-| ID | Task | Size | Notes |
-|----|------|------|-------|
-| 1.1 | Web hardening: sanitise filenames, delete temp dirs after download or on exit, cap upload size | S | D12, D13 |
-| 1.2 | Desktop launcher: start the server on `127.0.0.1` with a random port and a per-launch session token; open it in a pywebview window; shut down cleanly | M | Token blocks other local processes from calling the API |
-| 1.3 | Native file dialogs and **path-based processing** (no browser upload copy) for large files; drag-and-drop | M | Avoids loading files into memory twice |
-| 1.4 | App-data directories via `platformdirs` for config, mappings and logs | S | Replaces `~/.pii_faker` |
-| 1.5 | Prominent "mapping file contains real PII" UX: save-location prompt, warning badge, one-click "delete mapping" | S | |
-| 1.6 | Packaging with PyInstaller (or Briefcase): `.app` / `.dmg` (universal2, or separate arm64 + x86_64) and `.exe` installer | M | Expect a 150–250 MB bundle (Polars, PyArrow, fastexcel) |
-| 1.7 | GitHub Actions release matrix (no cross-compiling: build on `macos-latest` and `windows-latest`) | M | |
-| 1.8 | Code signing: Apple Developer ID + notarization; Windows signing via Azure Trusted Signing or SignPath (OSS) | M | Needs accounts and secrets; Apple is $99/yr. Unsigned builds trigger Gatekeeper/SmartScreen warnings, which undermines trust in a privacy tool. |
-| 1.9 | Check WebView2 at install time on Windows (built into Windows 11 and updated Windows 10) | S | |
+| ID | Task | Size | Notes | Status |
+|----|------|------|-------|--------|
+| 1.1 | Web hardening: sanitise filenames, delete temp dirs after download or on exit, cap upload size | S | D12, D13 | 🟢 done (hardened in Phase 0; reused here) |
+| 1.2 | Desktop launcher: start the server on `127.0.0.1` with a random port and a per-launch session token; open it in a pywebview window; shut down cleanly | M | Token blocks other local processes from calling the API | 🟢 done (`pii_faker/desktop.py`: random port + `token_urlsafe(32)` + `X-PII-Session` middleware; clean shutdown; fallback to browser when pywebview unavailable) |
+| 1.3 | Native file dialogs and **path-based processing** (no browser upload copy) for large files; drag-and-drop | M | Avoids loading files into memory twice | 🟢 done (`DesktopApi` JS bridge + `POST /api/detect-path` + `POST /api/process-path` — reads in place, outputs next to source; drag-and-drop already present) |
+| 1.4 | App-data directories via `platformdirs` for config, mappings and logs | S | Replaces `~/.pii_faker` | 🟢 done (`config.app_dirs`/`mappings_dir`/`user_config_path`; CLI `columns`/`cleanup` + config loader migrated; legacy `~/.pii_faker` still read) |
+| 1.5 | Prominent "mapping file contains real PII" UX: save-location prompt, warning badge, one-click "delete mapping" | S | | 🟢 done (hardened warning copy + save-location `<code>` + Delete button → `POST /api/delete-mapping`, PII-free delete) |
+| 1.6 | Packaging with PyInstaller (or Briefcase): `.app` / `.dmg` (universal2, or separate arm64 + x86_64) and `.exe` installer | M | Expect a 150–250 MB bundle (Polars, PyArrow, fastexcel) | 🟢 done (`packaging/*.spec` with heavy-dep excludes; arm64 `.app` 292 MB → `.dmg` 130 MB; frozen pipeline verified via token-auth API round-trip) |
+| 1.7 | GitHub Actions release matrix (no cross-compiling: build on `macos-latest` and `windows-latest`) | M | | 🟢 done (`.github/workflows/release.yml`: tag-triggered mac (`.dmg`) + Windows (`.exe`), upload-artifact) |
+| 1.8 | Code signing: Apple Developer ID + notarization; Windows signing via Azure Trusted Signing or SignPath (OSS) | M | Needs accounts and secrets; Apple is $99/yr. Unsigned builds trigger Gatekeeper/SmartScreen warnings, which undermines trust in a privacy tool. | ⬜ deferred (unsigned builds shipped — signing needs Developer ID / Trusted Signing secrets; TODO noted in release workflow) |
+| 1.9 | Check WebView2 at install time on Windows (built into Windows 11 and updated Windows 10) | S | | 🟢 done (`_check_webview2` preflight + hint, wired into `main`) |
 
 **Exit criteria:** a signed, notarized build installs and processes a CSV, an XLSX and an NDJSON file offline on a clean macOS and a clean Windows machine, with no security warnings.
+Unsigned arm64 build verified on this machine (UI shell + token-gated
+`/api/detect-path` → `/api/process-path` round-trip); signing still pending.
 
 > Ordering note: if the desktop app targets non-technical users, consider shipping Phase 2.1–2.3 before announcing 1.0. Those users won't know to check whether detection missed a column.
 

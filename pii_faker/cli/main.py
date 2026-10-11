@@ -339,11 +339,13 @@ def columns_command(
     """Manage custom PII columns."""
     import yaml
 
-    # Default config path
+    from pii_faker.core.config import user_config_path
+
+    # Default config path (platformdirs, with legacy ~/.pii_faker fallback)
     if config_path is None:
-        config_dir = Path.home() / ".pii_faker"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = str(config_dir / "config.yaml")
+        resolved = user_config_path()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        config_path = str(resolved)
 
     # Load existing config
     config_data = {}
@@ -398,13 +400,17 @@ def columns_command(
 @app.command()
 def cleanup(
     older_than: str = typer.Option("7d", "--older-than", help="Delete mappings older than (e.g., 7d, 24h)"),
-    directory: str = typer.Option(
-        str(Path.home() / ".pii_faker" / "mappings"),
-        "--directory", "-d", help="Mappings directory"
+    directory: Optional[str] = typer.Option(
+        None, "--directory", "-d", help="Mappings directory (default: app data dir)"
     ),
 ):
     """Clean up old mapping files."""
     from datetime import timedelta
+
+    from pii_faker.core.config import mappings_dir
+
+    if directory is None:
+        directory = str(mappings_dir())
 
     # Parse time delta (supports days and hours, incl. fractional)
     try:

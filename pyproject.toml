@@ -51,9 +51,11 @@ dev = [
     "httpx>=0.25.0",
     "hypothesis>=6.0.0",
 ]
+desktop = ["pywebview>=6.0", "platformdirs>=4.0"]
 
 [project.scripts]
 pii-faker = "pii_faker.cli.main:app"
+pii-faker-desktop = "pii_faker.desktop:main"
 
 [project.urls]
 Homepage = "https://github.com/zaenalium/pii-faker"

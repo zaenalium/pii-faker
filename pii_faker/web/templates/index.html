@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="pii-session-token" content="{{ session_token | default('') }}">
     <title>PII Faker</title>
     <style>
         * {
@@ -413,6 +414,12 @@
                 </p>
             </div>
             <input type="file" id="file-input" accept=".csv,.tsv,.xlsx,.xls,.json,.ndjson,.jsonl,.parquet" style="display: none">
+            <div id="desktop-open" class="hidden" style="margin-top: 10px;">
+                <button type="button" class="btn" onclick="openNativeFile()">📂 Open file (no upload copy)</button>
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Desktop only: reads the file in place — best for large files.
+                </small>
+            </div>
 
             <div id="file-info" class="hidden" style="margin-top: 15px;">
                 <strong>Selected:</strong> <span id="filename"></span>
@@ -473,11 +480,17 @@
                     ✅ Processing complete! Download your files below.
                 </div>
                 <div class="warning-box">
-                    ⚠️ <strong>Important:</strong> The mapping file contains real PII. Keep it secure and never send it to an LLM.
+                    ⚠️ <strong>Mapping file contains real PII.</strong> It maps every
+                    fake value back to the real person — never send it to an LLM,
+                    never email it, and delete it when you no longer need to restore.
+                    <div style="margin-top: 8px; font-size: 0.85rem;">
+                        Save location: <code id="mapping-path"></code>
+                    </div>
                 </div>
                 <div style="margin-top: 20px;">
                     <a id="download-output" class="download-btn">📥 Download Processed File</a>
                     <a id="download-mapping" class="download-btn">📥 Download Mapping</a>
+                    <button type="button" class="btn" id="delete-mapping-btn" onclick="deleteMapping()">🗑️ Delete Mapping</button>
                 </div>
             </div>
         </div>
@@ -525,9 +538,65 @@
         let selectedColumns = new Set();
         let currentMode = 'fake';
 
+        function sessionHeaders() {
+            const tag = document.querySelector('meta[name="pii-session-token"]');
+            const token = tag && tag.content ? tag.content : '';
+            return token ? { 'X-PII-Session': token } : {};
+        }
+
+        async function apiFetch(path, options) {
+            const merged = Object.assign({}, options);
+            merged.headers = Object.assign({}, merged.headers, sessionHeaders());
+            return fetch(path, merged);
+        }
+
         // File upload handling
         const uploadZone = document.getElementById('upload-zone');
         const fileInput = document.getElementById('file-input');
+
+        // Desktop bridge: native file dialogs + path-based flow (no upload copy)
+        let desktopPathMode = false;
+        if (window.pywebview && window.pywebview.api) {
+            document.getElementById('desktop-open').classList.remove('hidden');
+        }
+
+        async function openNativeFile() {
+            if (!window.pywebview || !window.pywebview.api) return;
+            try {
+                const path = await window.pywebview.api.open_file();
+                if (!path) return;
+                desktopPathMode = true;
+                document.getElementById('filename').textContent = path + ' (in place)';
+                document.getElementById('file-info').classList.remove('hidden');
+                await detectPIIPath(path);
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function detectPIIPath(path) {
+            try {
+                const response = await apiFetch('/api/detect-path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        path: path,
+                        match_strategy: 'normalized',
+                        extra_columns: '',
+                        override_defaults: false,
+                    }),
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    currentJobId = data.job_id;
+                    displayDetections(data.detections);
+                } else {
+                    alert('Error: ' + (data.detail || 'Failed to detect PII'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
 
         uploadZone.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -568,7 +637,7 @@
             formData.append('override_defaults', false);
 
             try {
-                const response = await fetch('/api/detect', {
+                const response = await apiFetch('/api/detect', {
                     method: 'POST',
                     body: formData,
                 });
@@ -760,19 +829,42 @@
             if (seed) formData.append('seed', parseInt(seed));
 
             try {
-                const response = await fetch('/api/process', {
-                    method: 'POST',
-                    body: formData,
-                });
+                let response;
+                if (desktopPathMode) {
+                    const payload = {
+                        job_id: currentJobId,
+                        selected_columns: allColumns.join(','),
+                        mode: currentMode,
+                        redact_style: document.getElementById('redact-style').value,
+                    };
+                    if (seed) payload.seed = parseInt(seed);
+                    response = await apiFetch('/api/process-path', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                } else {
+                    response = await apiFetch('/api/process', {
+                        method: 'POST',
+                        body: formData,
+                    });
+                }
 
                 const data = await response.json();
 
                 document.getElementById('loading').classList.remove('visible');
 
                 if (response.ok) {
-                    document.getElementById('download-output').href = `/api/download/${data.job_id}/output`;
-                    document.getElementById('download-mapping').href = `/api/download/${data.job_id}/mapping`;
-                    document.getElementById('result-section').classList.add('visible');
+                    if (desktopPathMode && data.output_path) {
+                        document.getElementById('mapping-path').textContent = data.mapping_path || '';
+                        document.getElementById('result-section').classList.add('visible');
+                        alert('Processed in place:\n' + data.output_path + '\nMapping:\n' + data.mapping_path);
+                    } else {
+                        document.getElementById('download-output').href = `/api/download/${data.job_id}/output`;
+                        document.getElementById('download-mapping').href = `/api/download/${data.job_id}/mapping`;
+                        document.getElementById('mapping-path').textContent = '(server temp file — deleted after download)';
+                        document.getElementById('result-section').classList.add('visible');
+                    }
                 } else {
                     alert('Error: ' + (data.detail || 'Processing failed'));
                 }
@@ -802,7 +894,7 @@
             formData.append('is_text', isText);
 
             try {
-                const response = await fetch('/api/restore', {
+                const response = await apiFetch('/api/restore', {
                     method: 'POST',
                     body: formData,
                 });
@@ -819,6 +911,28 @@
                 }
             } catch (error) {
                 document.getElementById('restore-loading').classList.remove('visible');
+                alert('Error: ' + error.message);
+            }
+        }
+
+        // One-click server-side mapping delete (1.5)
+        async function deleteMapping() {
+            if (!currentJobId) return;
+            if (!confirm('Delete the server-side mapping file? You will no longer be able to restore from it.')) return;
+            try {
+                const response = await apiFetch('/api/delete-mapping', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ job_id: currentJobId }),
+                });
+                const data = await response.json();
+                if (response.ok && data.deleted) {
+                    alert('Mapping deleted from the server.');
+                    document.getElementById('mapping-path').textContent = '(deleted)';
+                } else {
+                    alert('Could not delete mapping (it may already be gone).');
+                }
+            } catch (error) {
                 alert('Error: ' + error.message);
             }
         }

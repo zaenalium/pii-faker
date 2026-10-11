@@ -49,14 +49,46 @@ class PIIConfig(BaseModel):
     model_config = {"use_enum_values": True}
 
 
-DEFAULT_CONFIG_PATH = Path.home() / ".pii_faker" / "config.yaml"
+def app_dirs():
+    """Central app-data directories (roadmap 1.4, via platformdirs)."""
+    import platformdirs
+
+    return {
+        "config": Path(platformdirs.user_config_dir("pii-faker")),
+        "data": Path(platformdirs.user_data_dir("pii-faker")),
+        "logs": Path(platformdirs.user_log_dir("pii-faker")),
+    }
+
+
+def mappings_dir() -> Path:
+    """Directory for mapping files (created on demand)."""
+    path = app_dirs()["data"] / "mappings"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _legacy_config_path() -> Path:
+    return Path.home() / ".pii_faker" / "config.yaml"
+
+
+DEFAULT_CONFIG_PATH = _legacy_config_path()
+
+
+def user_config_path() -> Path:
+    """Config file path: platformdirs location, falling back to legacy."""
+    modern = app_dirs()["config"] / "config.yaml"
+    if modern.exists():
+        return modern
+    if _legacy_config_path().exists():
+        return _legacy_config_path()
+    return modern
 
 
 def load_user_extra_columns(config_path: Optional[str] = None) -> List[str]:
-    """Load user-defined extra PII columns from ~/.pii_faker/config.yaml."""
+    """Load user-defined extra PII columns from the user config file."""
     import yaml
 
-    path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    path = Path(config_path) if config_path else user_config_path()
     if not path.exists():
         return []
     try:

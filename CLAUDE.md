@@ -8,9 +8,9 @@ Package: `pii_faker/`, tests: `pii_faker/tests/`, entry: `pii_faker/cli/main.py`
 
 ## Source of truth
 `roadmap.md` §1 (ground-check findings D1–D13) and §2 (phased plan) drive all
-work. Phase 0 (all 14 items) and Phase 2 code items (2.1–2.5) are COMPLETE as
-of 2026-10-11, 67 tests green. 2.6 (optional NER) deferred as planned. Do not
-start Phase 1/3/4 without being asked.
+work. Phase 0 (all 14 items) and Phase 2 (2.1–2.5) are COMPLETE, 67 tests green.
+Phase 1 (desktop, unsigned) is complete: 1.1–1.7 + 1.9 done, 1.8 signing deferred
+(needs accounts). Do not start Phase 3/4 without being asked.
 
 ## Verified Polars behaviors (don't re-derive; tested empirically)
 - `pl.field(name)` — not `pl.col(name)` — for relative refs inside
@@ -79,6 +79,17 @@ start Phase 1/3/4 without being asked.
   value_detector`, `PIIConfig.locale` (`--locale`, web `locale` field),
   34 default patterns (Indonesian set), token-based fuzzy with
   `NON_PII_QUALIFIERS`.
+- Phase 1 (desktop, unsigned): `pii_faker/desktop.py` (random port +
+  session-token middleware, background uvicorn thread, fallback to browser,
+  `DesktopApi` save/open dialogs, `_check_webview2`), `POST /api/detect-path`
+  + `POST /api/process-path` (no upload copy, output next to source),
+  `POST /api/delete-mapping`, `platformdirs` app dirs
+  (`config.app_dirs`/`mappings_dir`/`user_config_path` — legacy read intact),
+  `packaging/pii-faker-*.spec` (292 MB .app → 130 MB .dmg arm64, frozen
+  pipeline verified via token-auth round-trip), `.github/workflows/release.yml`
+  (tag-triggered mac + Windows builds, signing TODO), `[desktop]` extra +
+  `pii-faker-desktop` entry point, hardened warning + delete-mapping UX.
+  Build artifacts (`dist/`, downloads) NOT cleaned — do not delete on sight.
 - Native-type uniqueness subtlety: string-level claiming is NOT enough
   ('9' vs '009' → both int 9). `_unique_native_fake` claims str(coerced).
 - Suite runs in ~4s; if pytest ever hangs, suspect value-detector regexes

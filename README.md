@@ -22,7 +22,35 @@ pip install -e .
 
 # Install with dev dependencies
 pip install -e ".[dev]"
+
+# Install for the macOS desktop app (needs a WebView)
+pip install -e ".[desktop]"
 ```
+
+## Desktop App (macOS today, Windows next)
+
+```bash
+# Launch from source
+pii-faker-desktop
+python -m pii_faker.desktop
+
+# Or build an unsigned .app/.dmg (no Apple Developer ID needed)
+pip install pyinstaller pywebview platformdirs
+pyinstaller --clean --noconfirm packaging/pii-faker-mac.spec
+# → dist/PII Faker.app, dist/PII-Faker-mac-arm64.dmg
+```
+
+The desktop app runs the same FastAPI UI in a native window on
+`127.0.0.1` with a random port and a per-launch session token, so other
+local processes cannot call its API. It supports both upload and
+**path-based processing** (native file dialog, no browser upload copy —
+best for large files), plus drag-and-drop. The server shuts down when
+you close the window.
+
+> Unsigned builds show macOS Gatekeeper / Windows SmartScreen warnings
+> until 1.8 code signing is provisioned (Apple Developer ID / Azure
+> Trusted Signing). WebView2 is built into Windows 11 and updated
+> Windows 10 (1.9).
 
 ## Quick Start
 
@@ -175,7 +203,9 @@ pii-faker columns list
 pii-faker columns remove ssn
 ```
 
-Custom columns are stored in `~/.pii_faker/config.yaml`.
+Custom columns are stored in the user config file (`~/Library/Application
+Support/pii-faker/config.yaml` on macOS, `~/.config/pii-faker/config.yaml` on
+Linux; legacy `~/.pii_faker/config.yaml` still works).
 
 ### Match Strategies
 
