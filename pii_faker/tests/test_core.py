@@ -20,7 +20,7 @@ class TestPIIConfig:
         config = PIIConfig()
         assert config.mode == PIIMode.FAKE
         assert config.match_strategy == MatchStrategy.NORMALIZED
-        assert config.redact_style == RedactionStyle.FULL
+        assert config.redact_style == RedactionStyle.TYPED_TOKEN
         assert config.seed is None
 
     def test_custom_config(self):

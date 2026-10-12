@@ -162,9 +162,31 @@ pii-faker serve --port 8000
 Open http://localhost:8000 in your browser to:
 1. Upload files (500 MB cap; filenames are sanitised)
 2. Preview detected PII columns (flat, nested, and JSON-string leaves)
-3. Select columns to process
-4. Choose fake or redact mode
-5. Download processed files and mapping (server temp files are deleted after download)
+3. Select columns to process (Redact + typed-token is the LLM-safe default)
+4. Download processed files, mapping, and PII-free audit
+5. **LLM Round-trip tab**: paste the model's response, get restored text with highlighted spans
+
+### LLM round-trip workflow
+
+```bash
+# Process with typed tokens (models rarely rewrite <PERSON_1>, but often rewrite "Mr. Smith")
+pii-faker process data.csv --mode redact --output tok.csv --mapping-out mapping.json
+
+# Paste the LLM response into the Round-trip tab, or restore pasted text via the API.
+# Tolerant restore handles case changes, possessives ("Smith's") and
+# first/last-name-only mentions; ambiguous fragments are left alone.
+
+# Date shifting (one consistent offset per run, intervals preserved)
+pii-faker process data.csv --shift-days 17 --output shifted.csv --mapping-out mapping.json
+
+# Numeric perturbation (±percent noise, deterministic per value)
+pii-faker process data.csv --perturb-pct 5 --output pert.csv --mapping-out mapping.json
+
+# Project mode: same person → same fake across files
+pii-faker project init myproject --mapping proj.json
+pii-faker process a.csv --output a_out.csv --project-mapping proj.json --seed 1
+pii-faker process b.csv --output b_out.csv --project-mapping proj.json --seed 1
+```
 
 > Note: the web UI runs on localhost only and is designed for a single
 > trusted user. Uploaded originals and plaintext mappings live in a temp

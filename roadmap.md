@@ -147,14 +147,22 @@ PII-free audit (verified by grep + unit test); `--preset id` wires locale +
 columns (verified end-to-end).
 
 ### Phase 4: LLM round-trip workflow (v0.6)
+*Status 2026-10-12: 4.1–4.5 complete — 7 new tests (80 green), round-trip
+screen + tolerant restore + shift/perturb + project reuse verified
+end-to-end via CLI and token-gated desktop server.*
 
-| ID | Task | Size | Notes |
-|----|------|------|-------|
-| 4.1 | GUI round-trip screen: processed file → "copy for LLM" → paste the LLM response → restored text, with restored spans highlighted | M | Depends on 0.8, 0.9 |
-| 4.2 | Make typed tokens (`<PERSON_1>`) the default for LLM use and explain why: realistic fakes get rewritten by models ("Mr. Smith"), tokens rarely do | S | |
-| 4.3 | Tolerant restore for realistic fakes: case-insensitive, possessives, first-name-only and last-name-only matches; flag ambiguous matches instead of guessing | M | |
-| 4.4 | Date shifting (one consistent offset per entity, so intervals are preserved) and numeric perturbation as additional modes | M | |
-| 4.5 | Project mode: one mapping shared across multiple files so a person gets the same fake everywhere | M | Builds on 0.10 |
+| ID | Task | Size | Notes | Status 2026-10-12 |
+|----|------|------|-------|-------------------|
+| 4.1 | GUI round-trip screen: processed file → "copy for LLM" → paste the LLM response → restored text, with restored spans highlighted | M | Depends on 0.8, 0.9 | 🟢 done (Round-trip tab: mapping upload + paste box → `POST /api/restore-text` → `restore_text_with_spans` → highlighted `<mark>` preview + copy button; file restore also returns spans) |
+| 4.2 | Make typed tokens (`<PERSON_1>`) the default for LLM use and explain why: realistic fakes get rewritten by models ("Mr. Smith"), tokens rarely do | S | | 🟢 done (redact default now `typed-token` everywhere — config, CLI, web preselected; UI + README explain the why; 2 legacy default assertions updated) |
+| 4.3 | Tolerant restore for realistic fakes: case-insensitive, possessives, first-name-only and last-name-only matches; flag ambiguous matches instead of guessing | M | | 🟢 done (`_restore_tolerant`: case-insensitive + `'s` + name parts; ambiguous fragments left alone, exposed as `ambiguous_hits` + API `ambiguous`; exact `restore_text` path untouched) |
+| 4.4 | Date shifting (one consistent offset per entity, so intervals are preserved) and numeric perturbation as additional modes | M | | 🟢 done (`--mode shift/perturb`, `--shift-days`, `--perturb-pct`; one offset per run, deterministic per-value noise; both fully restorable — verified) |
+| 4.5 | Project mode: one mapping shared across multiple files so a person gets the same fake everywhere | M | Builds on 0.10 | 🟢 done (`project init/add/status` + `--project-mapping` preload/merge-back; verified Budi → same fake across two files) |
+
+**Exit criteria:** round-trip tab restores pasted text with highlighted spans
+(verified via API); typed-token default documented; tolerant restore flags
+ambiguity (tested); shift/perturb round-trip exactly (tested); project reuse
+proven across files (verified).
 
 ### Phase 5: Exploratory (no commitment)
 

@@ -282,17 +282,110 @@ class PIIRestorer:
         Returns:
             Text with original values restored
         """
+        restored, _ = self.restore_text_with_spans(text, word_boundaries=word_boundaries)
+        return restored
+
+    def restore_text_with_spans(
+        self, text: str, word_boundaries: bool = False, tolerant: bool = False
+    ) -> "tuple[str, list[tuple[int, int, str]]]":
+        """Restore text and return (restored, spans).
+
+        Spans are (start, end, original) offsets into the restored text for
+        the round-trip UI (roadmap 4.1). With tolerant=True the scan is
+        case-insensitive and matches possessives ("Smith's") and first/last
+        name parts; see restore_tolerant for details.
+        """
+        if tolerant:
+            return self._restore_tolerant(text)
         if not self._reverse_mapping:
-            return text
+            return text, []
 
         pattern = self._get_text_regex(word_boundaries)
         if pattern is None:
-            return text
+            return text, []
 
-        def _replace(match: "re.Match") -> str:
-            return self._reverse_mapping[match.group(0)]
+        out: list[str] = []
+        spans: list[tuple[int, int, str]] = []
+        pos = 0
+        cursor = 0
+        out_len = 0
+        for match in pattern.finditer(text):
+            start, end = match.span()
+            out.append(text[cursor:start])
+            out_len += start - cursor
+            original = str(self._reverse_mapping[match.group(0)])
+            out.append(original)
+            spans.append((out_len, out_len + len(original), original))
+            out_len += len(original)
+            cursor = end
+            pos = end
+        out.append(text[cursor:])
+        return "".join(out), spans
 
-        return pattern.sub(_replace, text)
+    def _restore_tolerant(self, text: str) -> "tuple[str, list[tuple[int, int, str]]]":
+        """Tolerant restore for realistic fakes (roadmap 4.3).
+
+        Matches case-insensitively, handles "'s" possessives, and matches
+        first-name-only / last-name-only fragments of multi-word fakes.
+        Only unambiguous matches are replaced; ambiguous fragments (two
+        different originals sharing a first name) are left alone and
+        reported via ambiguous_hits.
+        """
+        self.ambiguous_hits: list[str] = []
+        reverse = self._reverse_mapping
+        if not reverse:
+            return text, []
+
+        single_names: dict[str, list] = {}
+        for fake in reverse:
+            if not isinstance(fake, str) or not fake:
+                continue
+            parts = fake.split()
+            if len(parts) >= 2:
+                for part in (parts[0], parts[-1]):
+                    if len(part) >= 2:
+                        single_names.setdefault(part.lower(), []).append(fake)
+
+        candidates: dict[str, str] = {}
+        for fake, original in reverse.items():
+            if not isinstance(fake, str) or not fake:
+                continue
+            candidates[fake.lower()] = fake
+        for frag_lower, fakes in single_names.items():
+            if len(fakes) == 1 and frag_lower not in candidates:
+                candidates[frag_lower] = fakes[0]
+            elif len(fakes) > 1:
+                self.ambiguous_hits.append(frag_lower)
+
+        if not candidates:
+            return text, []
+
+        ordered = sorted(candidates, key=len, reverse=True)
+        body = "|".join(re.escape(p) for p in ordered)
+        possessive = rf"(?:{body})(?:'s)?"
+        pattern = re.compile(possessive, re.IGNORECASE)
+
+        out: list[str] = []
+        spans: list[tuple[int, int, str]] = []
+        cursor = 0
+        out_len = 0
+        for match in pattern.finditer(text):
+            hit = match.group(0)
+            base = hit[:-2] if hit.lower().endswith("'s") else hit
+            key = candidates.get(base.lower())
+            if key is None:
+                continue
+            original = str(reverse[key])
+            suffix = hit[len(base):]
+            start = out_len + (match.start() - cursor)
+            out.append(text[cursor:match.start()])
+            out_len += match.start() - cursor
+            out.append(original + suffix)
+            spans.append((out_len, out_len + len(original), original))
+            out_len += len(original) + len(suffix)
+            cursor = match.end()
+        out.append(text[cursor:])
+        return "".join(out), spans
 
     def restore_json(self, data: Any) -> Any:
         """

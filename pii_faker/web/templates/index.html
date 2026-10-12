@@ -399,6 +399,7 @@
         <div class="tabs">
             <button class="tab active" onclick="switchTab('process')">Process Data</button>
             <button class="tab" onclick="switchTab('restore')">Restore Data</button>
+            <button class="tab" onclick="switchTab('roundtrip')">LLM Round-trip</button>
         </div>
 
         <!-- Process Tab -->
@@ -455,15 +456,19 @@
                         <div class="form-group">
                             <label>Mode</label>
                             <div class="mode-toggle">
-                                <button class="mode-btn active" onclick="setMode('fake', this)">🎭 Fake</button>
-                                <button class="mode-btn" onclick="setMode('redact', this)">🔒 Redact</button>
+                                <button class="mode-btn" onclick="setMode('fake', this)">🎭 Fake</button>
+                                <button class="mode-btn active" onclick="setMode('redact', this)">🔒 Redact</button>
                             </div>
+                            <small style="color: #666; display: block; margin-top: 5px;">
+                                Redact + <code>typed-token</code> is the LLM-safe default — tokens survive models, realistic fakes get rewritten.
+                            </small>
                         </div>
                     </div>
-                    <div class="col" id="redact-options" style="display: none;">
+                    <div class="col" id="redact-options">
                         <div class="form-group">
                             <label for="redact-style">Redaction Style</label>
                             <select id="redact-style">
+                                <option value="typed-token" selected>Typed token: &lt;PERSON_1&gt; (LLM default)</option>
                                 <option value="full">Full: [REDACTED]</option>
                                 <option value="partial">Partial: XXXX-1234</option>
                                 <option value="token">Token: REDACTED_0001</option>
@@ -537,8 +542,37 @@
                 <div class="info-box">
                     ✅ Restoration complete!
                 </div>
+                <div id="restore-spans" class="hidden" style="margin-top: 15px; padding: 15px; background: #f8f9ff; border-radius: 8px;">
+                    <strong>Restored preview (highlighted spans):</strong>
+                    <div id="restore-preview" style="margin-top: 8px; line-height: 1.8;"></div>
+                </div>
                 <div style="margin-top: 20px;">
                     <a id="download-restored" class="download-btn">📥 Download Restored File</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Round-trip Tab (4.1: copy for LLM → paste response → highlighted restore) -->
+        <div id="roundtrip-tab" class="card hidden">
+            <h2 style="margin-bottom: 20px;">💬 LLM Round-trip</h2>
+            <p style="color: #666; margin-bottom: 15px;">
+                Paste the LLM's response to your processed data below. Restored spans are highlighted.
+                Tip: process with <code>--redact-style typed-token</code> — models rarely rewrite tokens like <code>&lt;PERSON_1&gt;</code>, but often rewrite realistic fakes ("Mr. Smith").
+            </p>
+            <div class="form-group">
+                <label>Upload the Mapping File used for processing</label>
+                <input type="file" id="rt-mapping" accept=".json,.db,.sqlite,.pii">
+            </div>
+            <div class="form-group">
+                <label>Paste LLM response (with fakes/tokens)</label>
+                <textarea id="rt-input" rows="8" style="width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px;" placeholder="The report for <PERSON_1> ..."></textarea>
+            </div>
+            <button class="btn btn-primary" onclick="roundtripRestore()">✨ Restore pasted text</button>
+            <div id="rt-result" class="result-section">
+                <div class="info-box">✅ Restored — <span id="rt-count"></span> span(s).</div>
+                <div id="rt-preview" style="margin-top: 12px; padding: 15px; background: #f8f9ff; border-radius: 8px; line-height: 1.8;"></div>
+                <div style="margin-top: 12px;">
+                    <button class="btn" onclick="copyRestored()">📋 Copy restored text</button>
                 </div>
             </div>
         </div>
@@ -547,7 +581,7 @@
     <script>
         let currentJobId = null;
         let selectedColumns = new Set();
-        let currentMode = 'fake';
+        let currentMode = 'redact';
 
         function sessionHeaders() {
             const tag = document.querySelector('meta[name="pii-session-token"]');
@@ -826,7 +860,6 @@
             currentMode = mode;
             document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            document.getElementById('redact-options').style.display = mode === 'redact' ? 'block' : 'none';
         }
 
         async function processFile() {
@@ -984,6 +1017,63 @@
 
             document.getElementById('process-tab').classList.toggle('hidden', tab !== 'process');
             document.getElementById('restore-tab').classList.toggle('hidden', tab !== 'restore');
+            document.getElementById('roundtrip-tab').classList.toggle('hidden', tab !== 'roundtrip');
+        }
+
+        function escHtml(s) {
+            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function highlightSpans(text, spans) {
+            // spans are offsets into the RESTORED text
+            let html = '';
+            let cur = 0;
+            const ordered = (spans || []).slice().sort((a, b) => a.start - b.start);
+            for (const s of ordered) {
+                html += escHtml(text.slice(cur, s.start));
+                html += '<mark style="background: #c8e6c9; padding: 1px 3px; border-radius: 3px;">' + escHtml(text.slice(s.start, s.end)) + '</mark>';
+                cur = s.end;
+            }
+            html += escHtml(text.slice(cur));
+            return html;
+        }
+
+        let lastRestoredText = '';
+
+        async function roundtripRestore() {
+            const mappingFile = document.getElementById('rt-mapping').files[0];
+            const pasted = document.getElementById('rt-input').value;
+            if (!mappingFile || !pasted) {
+                alert('Please select a mapping file and paste the LLM response');
+                return;
+            }
+            const formData = new FormData();
+            formData.append('mapping_file', mappingFile);
+            formData.append('text', pasted);
+            try {
+                const response = await apiFetch('/api/restore-text', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    lastRestoredText = data.restored;
+                    document.getElementById('rt-count').textContent = (data.spans || []).length;
+                    document.getElementById('rt-preview').innerHTML = highlightSpans(data.restored, data.spans);
+                    document.getElementById('rt-result').classList.add('visible');
+                } else {
+                    alert('Error: ' + (data.detail || 'Restore failed'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        function copyRestored() {
+            navigator.clipboard.writeText(lastRestoredText).then(
+                () => alert('Copied!'),
+                (e) => alert('Copy failed: ' + e.message)
+            );
         }
     </script>
 </body>

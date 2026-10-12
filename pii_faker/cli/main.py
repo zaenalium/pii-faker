@@ -61,9 +61,9 @@ def process(
     input_file: str = typer.Argument(..., help="Input file path (CSV, Excel, JSON, NDJSON, Parquet)"),
     output: str = typer.Option(..., "--output", "-o", help="Output file path"),
     mapping_out: Optional[str] = typer.Option(None, "--mapping-out", "-m", help="Mapping file path"),
-    mode: PIIMode = typer.Option(PIIMode.FAKE, "--mode", help="Processing mode: fake or redact"),
+    mode: PIIMode = typer.Option(PIIMode.FAKE, "--mode", help="Processing mode: fake or redact (redact is LLM-safe)"),
     redact_style: RedactionStyle = typer.Option(
-        RedactionStyle.FULL, "--redact-style", help="Redaction style: full, partial, or token"
+        RedactionStyle.TYPED_TOKEN, "--redact-style", help="Redaction style: typed-token (LLM default), full, partial, or token"
     ),
     match_strategy: MatchStrategy = typer.Option(
         MatchStrategy.NORMALIZED, "--match-strategy", help="Column matching: exact, normalized, or fuzzy"
@@ -102,8 +102,23 @@ def process(
         100, "--infer-schema-length", help="Rows for JSON schema inference (0 for full scan)"
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be processed without doing it"),
+    shift_days: Optional[int] = typer.Option(
+        None, "--shift-days", help="Date-shift mode: fixed day offset (implies --mode shift)"
+    ),
+    perturb_pct: Optional[float] = typer.Option(
+        None, "--perturb-pct", help="Perturb mode: ±percent numeric noise (implies --mode perturb)"
+    ),
+    project_mapping: Optional[str] = typer.Option(
+        None, "--project-mapping", help="Project mode (4.5): reuse/add to this shared mapping file"
+    ),
 ):
     """Process a file to fake or redact PII."""
+
+    # Mode implications (4.4)
+    if shift_days is not None and mode == PIIMode.FAKE:
+        mode = PIIMode.SHIFT
+    if perturb_pct is not None and mode == PIIMode.FAKE:
+        mode = PIIMode.PERTURB
 
     # Parse extra columns
     extra_cols = []
@@ -128,6 +143,8 @@ def process(
         infer_schema_length=infer_schema_length if infer_schema_length != 0 else None,
         sheets=sheets,
         all_sheets=all_sheets,
+        shift_days=shift_days,
+        perturb_pct=perturb_pct,
     )
     if preset:
         from pii_faker.core.presets import apply_preset
@@ -525,6 +542,52 @@ def key_delete():
         console.print("[green]Master key deleted.[/green]")
     else:
         console.print("[yellow]No key to delete, or delete failed.[/yellow]")
+
+
+@app.command("project")
+def project_command(
+    action: str = typer.Argument(..., help="Action: init, add, status"),
+    name: Optional[str] = typer.Argument(None, help="Project name"),
+    mapping: Optional[str] = typer.Option(None, "--mapping", "-m", help="Shared project mapping file"),
+):
+    """Project mode (4.5): one shared mapping across multiple files.
+
+    init: create an empty project mapping. add: merge a per-file mapping
+    into the project mapping (same original → same fake is already enforced
+    by cross-scope reuse, so add is a union).
+    """
+    from pii_faker.core.mapper import PIIMapper
+
+    if action == "init":
+        if not name or not mapping:
+            console.print("[red]Error:[/red] project init needs a NAME and --mapping path.")
+            raise typer.Exit(code=1)
+        m = PIIMapper(PIIConfig())
+        m.save(mapping)
+        console.print(f"[green]Project {name!r} initialised:[/green] {mapping}")
+    elif action == "add":
+        if not mapping:
+            console.print("[red]Error:[/red] project add needs --mapping (project file) plus a FILE mapping.")
+            raise typer.Exit(code=1)
+        if not name:
+            console.print("[red]Error:[/red] project add needs the per-file mapping path as NAME.")
+            raise typer.Exit(code=1)
+        project = PIIMapper.load(mapping) if Path(mapping).exists() else PIIMapper(PIIConfig())
+        incoming = PIIMapper.load(name)
+        project.merge(incoming)
+        project.save(mapping)
+        console.print(f"[green]Merged[/green] {name} into {mapping}")
+    elif action == "status":
+        if not mapping:
+            console.print("[red]Error:[/red] project status needs --mapping.")
+            raise typer.Exit(code=1)
+        project = PIIMapper.load(mapping)
+        entries = len(project.store._entries)
+        scopes = project.store.scopes()
+        console.print(f"[bold]Entries:[/bold] {entries}  [bold]Scopes:[/bold] {', '.join(scopes) or '(none)'}")
+    else:
+        console.print(f"[red]Error:[/red] Unknown action {action!r}. Use: init, add, status")
+        raise typer.Exit(code=1)
 
 
 @app.command()

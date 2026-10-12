@@ -503,11 +503,16 @@ async def restore_file(
         if is_text:
             with open(input_path, 'r') as f:
                 text = f.read()
-            restored_text = restorer.restore_text(text)
+            restored_text, spans = restorer.restore_text_with_spans(text, tolerant=True)
             output_path = temp_dir / "restored.txt"
             with open(output_path, 'w') as f:
                 f.write(restored_text)
+            span_payload = [
+                {"start": s, "end": e, "original": o}
+                for (s, e, o) in spans
+            ]
         else:
+            span_payload = None
             config = mapper.config
             file_handler = FileHandler(config)
             df = file_handler.read(str(input_path))
@@ -533,6 +538,7 @@ async def restore_file(
             "job_id": restore_job_id,
             "status": "completed",
             "output_filename": f"restored_{_safe_filename(input_file.filename)}",
+            "spans": span_payload,
         })
 
     except HTTPException:
@@ -561,6 +567,36 @@ async def download_restore(job_id: str):
         media_type="application/octet-stream",
         background=BackgroundTask(_cleanup_job, job_id),
     )
+
+
+@app.post("/api/restore-text")
+async def restore_text_api(
+    mapping_file: UploadFile = File(...),
+    text: str = Form(...),
+    tolerant: bool = Form(True),
+    passphrase: Optional[str] = Form(None),
+):
+    """Restore pasted free-form text, returning restored text + spans (4.1/4.3)."""
+    temp_dir = Path(tempfile.mkdtemp(prefix="pii_faker_rt_"))
+    try:
+        mapping_path = temp_dir / _safe_filename(mapping_file.filename)
+        await _save_upload(mapping_file, mapping_path)
+        mapper = PIIMapper.load(str(mapping_path), passphrase=passphrase)
+        restorer = PIIRestorer(mapper)
+        restored, spans = restorer.restore_text_with_spans(text, tolerant=tolerant)
+        return JSONResponse({
+            "restored": restored,
+            "spans": [{"start": s, "end": e, "original": o} for (s, e, o) in spans],
+            "ambiguous": getattr(restorer, "ambiguous_hits", []),
+        })
+    except HTTPException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

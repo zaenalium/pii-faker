@@ -12,6 +12,8 @@ class PIIMode(str, Enum):
     """Mode of PII handling."""
     FAKE = "fake"
     REDACT = "redact"
+    SHIFT = "shift"
+    PERTURB = "perturb"
 
 
 class RedactionStyle(str, Enum):
@@ -32,7 +34,7 @@ class MatchStrategy(str, Enum):
 class PIIConfig(BaseModel):
     """Main configuration for PII processing."""
     mode: PIIMode = PIIMode.FAKE
-    redact_style: RedactionStyle = RedactionStyle.FULL
+    redact_style: RedactionStyle = RedactionStyle.TYPED_TOKEN
     match_strategy: MatchStrategy = MatchStrategy.NORMALIZED
     seed: Optional[int] = None
 
@@ -46,6 +48,9 @@ class PIIConfig(BaseModel):
     infer_schema_length: Optional[int] = 100
     sheets: Optional[str] = None
     all_sheets: bool = False
+    shift_days: Optional[int] = None
+    perturb_pct: Optional[float] = None
+    project_mapping: Optional[str] = None
 
     model_config = {"use_enum_values": True}
 

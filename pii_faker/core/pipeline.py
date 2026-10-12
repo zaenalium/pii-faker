@@ -508,6 +508,69 @@ def _reuse_across_scopes(
     return None
 
 
+def _shift_value(original: Any, config: PIIConfig, state) -> Any:
+    """Date shifting (roadmap 4.4): one consistent day offset per run.
+
+    All dates move by the same offset so intervals are preserved. The offset
+    comes from config.shift_days, else seeded RNG in [-30, -1] ∪ [1, 30].
+    Non-date values fall back to normal fakes.
+    """
+    import random
+
+    if getattr(state, "_shift_offset", None) is None:
+        if config.shift_days:
+            state._shift_offset = int(config.shift_days)
+        else:
+            rng = random.Random(config.seed)
+            delta = rng.randint(1, 30)
+            state._shift_offset = -delta if rng.random() < 0.5 else delta
+    offset = datetime.timedelta(days=state._shift_offset)
+    if isinstance(original, datetime.datetime):
+        return original + offset
+    if isinstance(original, datetime.date):
+        return original + offset
+    if isinstance(original, str):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+            try:
+                parsed = datetime.datetime.strptime(original[:10], fmt)
+                shifted = parsed + offset
+                return shifted.strftime(fmt)
+            except ValueError:
+                continue
+    return original
+
+
+def _perturb_value(original: Any, category: str, config: PIIConfig, state) -> Any:
+    """Numeric perturbation (roadmap 4.4): scale by ±perturb_pct (default 5%).
+
+    Deterministic per value via the run seed so the same original gets the
+    same perturbed result. String digits keep their format; non-numerics
+    fall back to normal fakes.
+    """
+    import hashlib
+    import random as _random
+
+    pct = float(config.perturb_pct) if config.perturb_pct else 5.0
+    seed_src = f"{config.seed}:{original}"
+    h = int(hashlib.md5(seed_src.encode()).hexdigest()[:8], 16)
+    rng = _random.Random(h)
+    factor = 1.0 + rng.uniform(-pct, pct) / 100.0
+    if isinstance(original, bool):
+        return original
+    if isinstance(original, int):
+        return int(round(original * factor))
+    if isinstance(original, float):
+        return round(original * factor, 6)
+    if isinstance(original, str) and original.strip().replace(".", "", 1).replace("-", "", 1).isdigit():
+        try:
+            if "." in original:
+                return str(round(float(original) * factor, 6))
+            return str(int(round(int(original) * factor)))
+        except ValueError:
+            pass
+    return original
+
+
 def _transform_value(
     original: Any,
     category: str,
@@ -523,6 +586,10 @@ def _transform_value(
         return redactor._apply_redaction(
             original, redactor.config.redact_style, category, field_name
         )
+    if mode == PIIMode.SHIFT or (isinstance(mode, str) and mode == "shift"):
+        return _shift_value(original, redactor.config, generator.run_state)
+    if mode == PIIMode.PERTURB or (isinstance(mode, str) and mode == "perturb"):
+        return _perturb_value(original, category, redactor.config, generator.run_state)
     if isinstance(original, str):
         return generator.generate_unique_fake(original, category, field_name)
     if isinstance(original, bool):
@@ -956,6 +1023,19 @@ def process_sheets(
     processed: Dict[str, pl.DataFrame] = {}
     all_targets: List[Any] = []
     counts: Dict[str, int] = {}
+    project_mapper: Optional[PIIMapper] = None
+    if getattr(config, "project_mapping", None):
+        from pathlib import Path as _P
+
+        _pp = _P(str(config.project_mapping))
+        if _pp.exists():
+            try:
+                project_mapper = PIIMapper.load(str(_pp))
+                for _k, _e in project_mapper.store._entries.items():
+                    if _k not in mapper.store._entries:
+                        mapper.store._entries[_k] = _e
+            except Exception:
+                project_mapper = None
     for sheet_name, frame in sheets.items():
         scope = "" if single_scope else sheet_name
         plan = plan_dataframe(frame, config, selected)
@@ -976,6 +1056,13 @@ def process_sheets(
 
     if mapping_out:
         mapper.save(mapping_out)
+
+    if getattr(config, "project_mapping", None) and project_mapper is not None:
+        try:
+            project_mapper.merge(mapper)
+            project_mapper.save(str(config.project_mapping))
+        except Exception:
+            pass
 
     leak_reports = _leak_check_sheets(processed, mapper, single_scope)
     for sheet_name, report in leak_reports.items():
