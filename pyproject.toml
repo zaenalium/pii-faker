@@ -53,6 +53,7 @@ dev = [
 ]
 desktop = ["pywebview>=6.0", "platformdirs>=4.0"]
 enc = ["cryptography>=42", "keyring>=25"]
+nlp = ["spacy>=3.7"]
 
 [project.scripts]
 pii-faker = "pii_faker.cli.main:app"

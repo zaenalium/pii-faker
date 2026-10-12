@@ -111,6 +111,7 @@ def process(
     project_mapping: Optional[str] = typer.Option(
         None, "--project-mapping", help="Project mode (4.5): reuse/add to this shared mapping file"
     ),
+    ner: bool = typer.Option(False, "--ner", help="Enable free-text NER for names/addresses (requires pii-faker[nlp])"),
 ):
     """Process a file to fake or redact PII."""
 
@@ -145,6 +146,7 @@ def process(
         all_sheets=all_sheets,
         shift_days=shift_days,
         perturb_pct=perturb_pct,
+        ner=ner,
     )
     if preset:
         from pii_faker.core.presets import apply_preset

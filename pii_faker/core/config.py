@@ -51,6 +51,7 @@ class PIIConfig(BaseModel):
     shift_days: Optional[int] = None
     perturb_pct: Optional[float] = None
     project_mapping: Optional[str] = None
+    ner: bool = False
 
     model_config = {"use_enum_values": True}
 

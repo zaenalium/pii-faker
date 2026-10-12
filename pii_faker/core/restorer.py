@@ -126,6 +126,9 @@ class PIIRestorer:
         # JSON-string columns (native decode -> nested restore -> encode)
         df = self.restore_json_columns(df)
 
+        # Free-text inline columns (2.6): longest-first exact restore inside prose.
+        df = self._restore_free_text_columns(df)
+
         expressions = []
         for col_name, col_type in df.schema.items():
             if col_name in self._scoped_reverse or col_name in self._reverse_by_column:
@@ -253,6 +256,29 @@ class PIIRestorer:
                     return_dtype=pl.Utf8,
                 )
                 .alias(parent)
+            )
+        return df
+
+    def _restore_free_text_columns(self, df: pl.DataFrame) -> pl.DataFrame:
+        entries = self.mapper.store.entries_for_scope(self.scope)
+        free = {col: e for col, e in entries.items() if e.get("kind") == "free_text"}
+        if not free:
+            return df
+        for col, entry in free.items():
+            if col not in df.columns:
+                continue
+            mapping = entry.get("mapping", {})
+            if not mapping:
+                continue
+            rev = {v: k for k, v in mapping.items() if isinstance(v, str) and v}
+            if not rev:
+                continue
+            rx = _build_text_regex(list(rev.keys()), False)
+            df = df.with_columns(
+                pl.col(col).map_elements(
+                    lambda v, _rx=rx, _rev=rev: _rx.sub(lambda m: str(_rev[m.group(0)]), v) if isinstance(v, str) and v else v,
+                    return_dtype=pl.Utf8,
+                ).alias(col)
             )
         return df
 

@@ -39,7 +39,7 @@ from pii_faker.core import values as V
 class Target:
     """One leaf to process: a flat column, a nested path, or a JSON-string leaf."""
 
-    kind: str  # "flat" | "nested" | "json_string"
+    kind: str  # "flat" | "nested" | "json_string" | "free_text"
     column: str  # top-level column name
     path: str  # full dotted path (flat: same as column)
     category: str
@@ -292,11 +292,47 @@ def plan_dataframe(
                 kind="json_string",
                 column=parent,
                 path=full,
-                category=category,
+                 category=category,
                 pattern=leaf,
                 description=f"JSON-string leaf: {full}",
                 json_path=jpath,
             ))
+
+    # Free-text NER inside text columns (2.6, opt-in via --ner so non-NER prose stays tooled separately)
+    if getattr(config, "ner", False):
+        try:
+            from pii_faker.core.ner import column_looks_like_prose, extract_spans
+
+            sampled_flat = {t.path for t in plan.targets if t.kind in ("flat", "free_text")}
+            for col_name, dtype in df.schema.items():
+                if col_name in sampled_flat:
+                    continue
+                if not V.is_string_dtype(dtype):
+                    continue
+                sample = [v for v in df[col_name].drop_nulls().head(20).to_list() if isinstance(v, str) and v]
+                if not sample or not column_looks_like_prose(sample):
+                    continue
+                if not _selected(col_name, col_name):
+                    continue
+                has_pii = False
+                for text in sample[:5]:
+                    try:
+                        if extract_spans(text):
+                            has_pii = True
+                            break
+                    except ImportError:
+                        has_pii = False
+                        break
+                if has_pii:
+                    plan.targets.append(Target(
+                        kind="free_text", column=col_name, path=col_name,
+                        category="name", pattern="ner",
+                        description="NER: names/addresses inside prose",
+                        dtype_name=str(dtype),
+                        confidence=0.6, name_match=False, value_detector="ner",
+                    ))
+        except ImportError:
+            pass
 
     return plan
 
@@ -685,8 +721,15 @@ def apply_plan(
     if not plan.has_work:
         return df
 
+    # Free-text inline targets: collect NER spans per row and fake inline.
+    free_text_targets = [t for t in plan.targets if t.kind == "free_text"]
+    if free_text_targets:
+        df = _apply_free_text_targets(df, free_text_targets, config, mapper, generator, redactor, scope)
+
     by_target: Dict[int, Dict[Any, Any]] = {}
     for idx, target in enumerate(plan.targets):
+        if target.kind == "free_text":
+            continue
         field_name = target.path.split(".")[-1].replace("[*]", "")
         if target.kind == "json_string":
             uniques = _collect_json_leaf_values(df, target)
@@ -929,6 +972,86 @@ def _apply_json_leaves(data: Any, mapping: Dict[str, str], paths: Any, prefix: s
     if isinstance(data, str) and prefix in paths:
         return mapping.get(data, data)
     return data
+
+
+def _apply_free_text_targets(
+    df: pl.DataFrame,
+    targets: List[Target],
+    config: PIIConfig,
+    mapper: PIIMapper,
+    generator: PIIGenerator,
+    redactor: PIIRedactor,
+    scope: str,
+) -> pl.DataFrame:
+    """Inline NER fakery: replace entity spans inside prose (2.6).
+
+    Each distinct span text is faked once (shared across rows via the
+    run-state), then every row's prose is rebuilt with its spans replaced.
+    The per-column mapping is the union of span fakes touched by that column.
+    """
+    try:
+        from pii_faker.core.ner import extract_spans
+    except ImportError:
+        return df
+
+    df = df.clone() if hasattr(df, "clone") else df
+    span_fake: Dict[str, str] = {}
+    for target in targets:
+        col = target.column
+        if col not in df.columns:
+            continue
+        rows = df[col].to_list()
+        by_span: Dict[str, str] = {}
+        for val in rows:
+            if not isinstance(val, str) or not val:
+                continue
+            try:
+                spans = extract_spans(val)
+            except ImportError:
+                spans = []
+            for span in spans:
+                key = span.text
+                if key not in span_fake and key not in by_span:
+                    reused = _reuse_across_scopes(mapper, target, key, scope)
+                    if reused is not None:
+                        span_fake[key] = reused[0]
+                        by_span[key] = reused[0]
+                    else:
+                        fake = _transform_value(key, span.category, target.column, config.mode, generator, redactor)
+                        span_fake[key] = fake
+                        by_span[key] = fake
+                elif key in span_fake:
+                    by_span[key] = span_fake[key]
+
+        if not by_span:
+            continue
+        mapper.add_column_mapping(col, target.category, dict(by_span), scope=scope, kind="free_text", path=col)
+
+        def _replace(val: object, _m=by_span) -> object:
+            if not isinstance(val, str) or not val:
+                return val
+            try:
+                spans_local = extract_spans(val)
+            except ImportError:
+                return val
+            if not spans_local:
+                return val
+            out: list[str] = []
+            cur = 0
+            for span in sorted(spans_local, key=lambda s: s.start):
+                fake = _m.get(span.text)
+                if fake is None:
+                    continue
+                out.append(val[cur:span.start])
+                out.append(fake)
+                cur = span.end
+            out.append(val[cur:])
+            return "".join(out)
+
+        df = df.with_columns(pl.col(col).map_elements(_replace, return_dtype=pl.Utf8).alias(col))
+    return df
+
+
 
 
 def process_dataframe(
