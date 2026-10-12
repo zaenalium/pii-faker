@@ -313,10 +313,29 @@ class PIIMapper:
             return reverse.get(replacement)
         return None
 
-    def save(self, path: str):
-        """Save mapping to file (JSON or SQLite)."""
+    def save(self, path: str, *, passphrase: Optional[str] = None, encrypt: bool = False, use_keyring: bool = True):
+        """Save mapping to file (JSON or SQLite).
+
+        When encrypt is True, the file is wrapped in an AES-GCM envelope
+        (roadmap 3.1). Decryption is probed automatically on load, so old
+        plaintext v2 files keep loading unchanged.
+        """
         path_obj = Path(path)
         data = self.store.to_dict(session_id=self._session_id)
+
+        if encrypt:
+            from pii_faker.core import crypto as _crypto
+
+            if path_obj.suffix in (".db", ".sqlite"):
+                raw = json.dumps(data, ensure_ascii=False).encode()
+                env = _crypto.encrypt_bytes(raw, passphrase=passphrase, use_keyring=use_keyring)
+                with open(path, "w") as f:
+                    json.dump(env, f)
+                return
+            env = _crypto.encrypt_dict(data, passphrase=passphrase, use_keyring=use_keyring)
+            with open(path, "w") as f:
+                json.dump(env, f)
+            return
 
         if path_obj.suffix == ".db" or path_obj.suffix == ".sqlite":
             self._save_sqlite(path, data)
@@ -393,15 +412,42 @@ class PIIMapper:
         conn.close()
 
     @classmethod
-    def load(cls, path: str, config: Optional[PIIConfig] = None) -> 'PIIMapper':
-        """Load mapping from file (v1 or v2, JSON or SQLite)."""
+    def load(cls, path: str, config: Optional[PIIConfig] = None, *, passphrase: Optional[str] = None, use_keyring: bool = True) -> 'PIIMapper':
+        """Load mapping from file (v1 or v2, JSON or SQLite, plaintext or encrypted)."""
         path_obj = Path(path)
 
         if path_obj.suffix == ".db" or path_obj.suffix == ".sqlite":
+            try:
+                with open(path, "r") as f:
+                    probe = json.load(f)
+                from pii_faker.core import crypto as _crypto
+
+                if _crypto.is_encrypted_envelope(probe):
+                    data = _crypto.decrypt_dict(probe, passphrase=passphrase, use_keyring=use_keyring)
+                    store = MappingStore.from_dict(data, config)
+                    mapper = cls(store.config)
+                    mapper.store = store
+                    sid = store._metadata.get("session_id")
+                    if sid:
+                        mapper._session_id = sid
+                    return mapper
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
             data = cls._load_sqlite(path)
         else:
             with open(path, "r") as f:
-                data = json.load(f)
+                raw = json.load(f)
+            try:
+                from pii_faker.core import crypto as _crypto
+
+                if _crypto.is_encrypted_envelope(raw):
+                    raw = _crypto.decrypt_dict(raw, passphrase=passphrase, use_keyring=use_keyring)
+            except Exception:
+                from pii_faker.core.crypto import CryptoError
+
+                if isinstance(raw, dict) and raw.get("enc") == "aes-gcm":
+                    raise
+            data = raw
 
         store = MappingStore.from_dict(data, config)
         mapper = cls(store.config)
@@ -482,25 +528,89 @@ class PIIMapper:
             "mappings": mappings,
         }
 
-    def cleanup_old_mappings(self, directory: str, older_than_days: float = 7):
-        """Clean up mapping files older than specified days (fractional days allowed)."""
+    def cleanup_old_mappings(self, directory: str, older_than_days: float = 7, *, pattern: Optional[str] = None):
+        """Clean up mapping files older than specified days (roadmap 3.2).
+
+        Detection is by format (tool=="pii-faker" and a version field, or the
+        SQLite metadata row) rather than filename, so non-`mapping_*` files
+        that contain our format are still found, and random `mapping_*.json`
+        from other tools are left alone. Returns the number of files deleted.
+        """
+        import fnmatch
+
         dir_path = Path(directory)
         if not dir_path.is_dir():
-            return
+            return 0
         cutoff = dt_datetime.now() - timedelta(days=older_than_days)
+        deleted = 0
 
-        for path in dir_path.glob("mapping_*"):
+        for path in dir_path.iterdir():
             if not path.is_file():
                 continue
-            # Prefer timestamp embedded in filename (mapping_<iso-timestamp>_<uuid>.*),
-            # fall back to file mtime so plain names like mapping.json still expire.
-            try:
-                parts = path.stem.split("_")
-                if len(parts) >= 2:
-                    file_time = dt_datetime.fromisoformat(parts[1])
-                else:
-                    raise ValueError("no timestamp in name")
-            except (ValueError, IndexError):
-                file_time = dt_datetime.fromtimestamp(path.stat().st_mtime)
+            if pattern and not fnmatch.fnmatch(path.name, pattern):
+                continue
+            if not self._is_our_mapping_file(path):
+                continue
+            file_time = self._mapping_file_time(path)
             if file_time < cutoff:
-                path.unlink()
+                try:
+                    path.unlink()
+                    deleted += 1
+                except OSError:
+                    pass
+        return deleted
+
+    def _is_our_mapping_file(self, path: Path) -> bool:
+        """Probe whether a file is recognisably our mapping format."""
+        suffix = path.suffix.lower()
+        if suffix in (".db", ".sqlite"):
+            try:
+                conn = sqlite3.connect(str(path))
+                cur = conn.cursor()
+                cur.execute("SELECT value FROM metadata WHERE key='tool'")
+                row = cur.fetchone()
+                conn.close()
+                return row is not None and row[0] == "pii-faker"
+            except Exception:
+                return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return False
+        if isinstance(data, dict) and data.get("enc") == "aes-gcm":
+            return True
+        return data.get("tool") == "pii-faker" and "version" in data
+
+    def _mapping_file_time(self, path: Path) -> dt_datetime:
+        """Best creation time for a mapping file: in-file created_at, else mtime."""
+        suffix = path.suffix.lower()
+        if suffix in (".db", ".sqlite"):
+            try:
+                conn = sqlite3.connect(str(path))
+                cur = conn.cursor()
+                cur.execute("SELECT value FROM metadata WHERE key='created_at'")
+                row = cur.fetchone()
+                conn.close()
+                if row and row[0]:
+                    return dt_datetime.fromisoformat(row[0])
+            except Exception:
+                pass
+            return dt_datetime.fromtimestamp(path.stat().st_mtime)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get("enc") == "aes-gcm":
+                return dt_datetime.fromtimestamp(path.stat().st_mtime)
+            created = data.get("created_at")
+            if created:
+                return dt_datetime.fromisoformat(created)
+        except Exception:
+            pass
+        try:
+            parts = path.stem.split("_")
+            if len(parts) >= 2:
+                return dt_datetime.fromisoformat(parts[1])
+        except Exception:
+            pass
+        return dt_datetime.fromtimestamp(path.stat().st_mtime)

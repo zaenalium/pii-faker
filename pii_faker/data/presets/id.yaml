@@ -1,0 +1,28 @@
+# Indonesia preset (UU PDP-oriented, roadmap 3.4).
+# Generic format — add more files like eu-gdpr.yaml without code changes.
+name: id
+description: "Indonesia (UU PDP) — NIK, NPWP, BPJS, nama, alamat, tanggal_lahir + id_ID Faker locale"
+locale: id_ID
+columns:
+  - pattern: nik
+    category: identifier
+  - pattern: no_ktp
+    category: identifier
+  - pattern: npwp
+    category: identifier
+  - pattern: no_bpjs
+    category: identifier
+  - pattern: bpjs
+    category: identifier
+  - pattern: nama
+    category: name
+  - pattern: nama_lengkap
+    category: name
+  - pattern: alamat
+    category: address
+  - pattern: tanggal_lahir
+    category: date
+  - pattern: no_hp
+    category: contact
+  - pattern: no_telepon
+    category: contact

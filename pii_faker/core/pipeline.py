@@ -947,12 +947,15 @@ def process_sheets(
 
     config = with_user_columns(config)
     run_state = RunState()
+    started_at = datetime.datetime.now()
     mapper = PIIMapper(config)
     generator = PIIGenerator(config, run_state)
     redactor = PIIRedactor(config, run_state)
 
     single_scope = len(sheets) == 1 and next(iter(sheets)) == "default"
     processed: Dict[str, pl.DataFrame] = {}
+    all_targets: List[Any] = []
+    counts: Dict[str, int] = {}
     for sheet_name, frame in sheets.items():
         scope = "" if single_scope else sheet_name
         plan = plan_dataframe(frame, config, selected)
@@ -960,6 +963,13 @@ def process_sheets(
             run_state.warn(
                 f"[{sheet_name}] column {skipped['column']!r}: {skipped['reason']}"
             )
+        all_targets.extend(plan.targets)
+        for t in plan.targets:
+            key = t.path
+            try:
+                counts[key] = int(frame[t.column].n_unique()) if t.kind == "flat" else len(_collect_target_uniques(frame, t))
+            except Exception:
+                counts[key] = 0
         processed[sheet_name] = apply_plan(
             frame, plan, config, mapper, generator, redactor, scope=scope
         )
@@ -971,6 +981,28 @@ def process_sheets(
     for sheet_name, report in leak_reports.items():
         if not report.clean:
             run_state.warn(f"[{sheet_name}] {report.summary()}")
+
+    audit = None
+    try:
+        from pii_faker.core.audit import build_audit
+
+        audit = build_audit(
+            run_id=mapper.session_id,
+            started_at=started_at,
+            finished_at=datetime.datetime.now(),
+            config=config,
+            targets=all_targets,
+            counts=counts,
+            warnings=list(dict.fromkeys(run_state.warnings)),
+            leak_report={"clean": all(getattr(r, "clean", True) for r in leak_reports.values())},
+        )
+        run_state.audit = audit  # type: ignore[attr-defined]
+        if mapping_out:
+            from pii_faker.core.audit import write_audit_files
+
+            write_audit_files(audit, mapping_out)
+    except Exception:
+        pass
 
     return processed, mapper, run_state
 

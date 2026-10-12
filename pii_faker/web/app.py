@@ -54,6 +54,11 @@ async def home(request: Request):
     """Home page with file upload form."""
     import os
 
+    try:
+        from pii_faker.core.config import auto_expire_mappings
+        auto_expire_mappings()
+    except Exception:
+        pass
     template = templates.get_template("index.html")
     session_token = os.environ.get("PII_FAKER_SESSION_TOKEN", "")
     token = getattr(app.state, "session_token", "") or session_token
@@ -192,6 +197,14 @@ def _detect_path_job(
 from pydantic import BaseModel
 
 
+@app.get("/api/presets")
+async def list_presets_api():
+    """List compliance presets (roadmap 3.4)."""
+    from pii_faker.core.presets import list_presets
+
+    return JSONResponse(list_presets())
+
+
 class DeleteMappingBody(BaseModel):
     """Request body for deleting a job's server-side mapping file."""
 
@@ -233,6 +246,7 @@ class ProcessPathBody(BaseModel):
     redact_style: str = "full"
     seed: Optional[int] = None
     locale: Optional[str] = None
+    preset: Optional[str] = None
     output_path: Optional[str] = None
     mapping_path: Optional[str] = None
 
@@ -343,6 +357,9 @@ async def process_file(
         job["mapping_path"] = str(mapping_path)
         job["status"] = "completed"
         job["warnings"] = run_state.warnings
+        # Expose PII-free audit (3.3) for GET /api/download/{job_id}/audit
+        job["audit"] = run_state.audit.to_dict() if hasattr(run_state, "audit") and run_state.audit else None
+        job["audit_json"] = str(mapping_path).replace(".json", "_audit.json").replace(".db", "_audit.json") if hasattr(run_state, "audit") and run_state.audit else None
 
         return JSONResponse({
             "job_id": job_id,
@@ -411,6 +428,8 @@ async def process_path(body: ProcessPathBody):
         job["mapping_path"] = str(mapping_path)
         job["status"] = "completed"
         job["warnings"] = run_state.warnings
+        job["audit"] = run_state.audit.to_dict() if hasattr(run_state, "audit") and run_state.audit else None
+        job["audit_json"] = str(mapping_path).replace(".json", "_audit.json").replace(".db", "_audit.json") if hasattr(run_state, "audit") and run_state.audit else None
 
         return JSONResponse({
             "job_id": body.job_id,
@@ -425,11 +444,20 @@ async def process_path(body: ProcessPathBody):
 
 @app.get("/api/download/{job_id}/{file_type}")
 async def download_file(job_id: str, file_type: str):
-    """Download processed file or mapping (temp dir deleted afterwards)."""
+    """Download processed file, mapping, or audit (temp dir deleted afterwards for files)."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
     job = jobs[job_id]
+
+    if file_type == "audit":
+        audit = job.get("audit")
+        if audit is None:
+            audit_json = job.get("audit_json")
+            if audit_json and Path(audit_json).exists():
+                return FileResponse(audit_json, filename=f"audit_{job_id}.json", media_type="application/json")
+            raise HTTPException(status_code=404, detail="Audit not found")
+        return JSONResponse(audit)
 
     if file_type == "output":
         file_path = job.get("output_path")

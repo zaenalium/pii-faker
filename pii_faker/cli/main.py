@@ -48,6 +48,11 @@ def main(
     """
     PII Faker - Detect, fake, or redact PII in datasets for LLM-safe data sharing.
     """
+    try:
+        from pii_faker.core.config import auto_expire_mappings
+        auto_expire_mappings()
+    except Exception:
+        pass
     pass
 
 
@@ -78,6 +83,18 @@ def process(
     ),
     locale: Optional[str] = typer.Option(
         None, "--locale", help="Faker locale for fake data (e.g., id_ID, en_US)"
+    ),
+    preset: Optional[str] = typer.Option(
+        None, "--preset", help="Compliance preset (e.g., id for Indonesia/UU PDP)"
+    ),
+    encrypt: bool = typer.Option(
+        False, "--encrypt", help="Encrypt the mapping file (AES-GCM, keychain/passphrase)"
+    ),
+    passphrase: Optional[str] = typer.Option(
+        None, "--passphrase", help="Passphrase for mapping encryption (or set PII_FAKER_PASSPHRASE)"
+    ),
+    audit_out: Optional[str] = typer.Option(
+        None, "--audit-out", help="Write a PII-free audit report (JSON) to this path"
     ),
     sheets: Optional[str] = typer.Option(None, "--sheets", help="Excel sheets to process"),
     all_sheets: bool = typer.Option(False, "--all-sheets", help="Process all Excel sheets"),
@@ -112,6 +129,10 @@ def process(
         sheets=sheets,
         all_sheets=all_sheets,
     )
+    if preset:
+        from pii_faker.core.presets import apply_preset
+
+        config = apply_preset(config, preset)
 
     try:
         # Read input
@@ -190,8 +211,50 @@ def process(
 
         # Save mapping
         if mapping_out:
-            mapper.save(mapping_out)
+            if encrypt:
+                mapper.save(mapping_out, encrypt=True, passphrase=passphrase)
+            else:
+                mapper.save(mapping_out)
             console.print(f"[bold]Mapping saved[/bold] to {mapping_out}")
+            try:
+                audit_json = mapping_out.replace(".json", "_audit.json").replace(".db", "_audit.json")
+                if Path(audit_json).exists():
+                    console.print(f"[dim]Audit: {audit_json}[/dim]")
+            except Exception:
+                pass
+        if audit_out:
+            from pii_faker.core.audit import build_audit
+            import datetime as _dt
+
+            # Reuse the audit already built on run_state if present; else build one from the sheets.
+            audit = getattr(run_state, "audit", None)
+            if audit is None:
+                all_targets: list = []
+                counts: dict = {}
+                for sheet_name, frame in sheets_to_process.items():
+                    from pii_faker.core.pipeline import plan_dataframe
+
+                    plan = plan_dataframe(frame, config)
+                    all_targets.extend(plan.targets)
+                    for t in plan.targets:
+                        try:
+                            counts[t.path] = int(frame[t.column].n_unique())
+                        except Exception:
+                            counts[t.path] = 0
+                audit = build_audit(
+                    run_id=mapper.session_id,
+                    started_at=_dt.datetime.now(),
+                    finished_at=_dt.datetime.now(),
+                    config=config,
+                    targets=all_targets,
+                    counts=counts,
+                    warnings=list(dict.fromkeys(run_state.warnings)),
+                    leak_report={"clean": True},
+                )
+            import json as _json
+
+            Path(audit_out).write_text(_json.dumps(audit.to_dict() if hasattr(audit, "to_dict") else audit, indent=2, ensure_ascii=False))
+            console.print(f"[dim]Audit: {audit_out}[/dim]")
 
         console.print("[bold green]Done![/bold green]")
 
@@ -277,11 +340,12 @@ def restore(
     mapping: str = typer.Option(..., "--mapping", "-m", help="Mapping file path"),
     output: str = typer.Option(..., "--output", "-o", help="Output file path"),
     is_text: bool = typer.Option(False, "--text", "-t", help="Input is free-form text"),
+    passphrase: Optional[str] = typer.Option(None, "--passphrase", help="Passphrase for encrypted mapping"),
 ):
     """Restore original values from faked/redacted data."""
     try:
         console.print(f"[bold]Loading mapping[/bold] from {mapping}...")
-        mapper = PIIMapper.load(mapping)
+        mapper = PIIMapper.load(mapping, passphrase=passphrase)
 
         restorer = PIIRestorer(mapper)
 
@@ -395,6 +459,72 @@ def columns_command(
     else:
         console.print(f"[red]Error:[/red] Unknown action '{action}'. Use: add, list, remove")
         raise typer.Exit(code=1)
+
+
+@app.command("presets")
+def presets_command(
+    action: str = typer.Argument(..., help="Action: list or show"),
+    name: Optional[str] = typer.Argument(None, help="Preset name (for show)"),
+):
+    """List or show compliance presets."""
+    from pii_faker.core.presets import list_presets, load_preset
+
+    if action == "list":
+        presets = list_presets()
+        if not presets:
+            console.print("  (none)")
+            return
+        table = Table(title="Presets")
+        table.add_column("Name", style="cyan")
+        table.add_column("Locale", style="green")
+        table.add_column("Description")
+        for p in presets:
+            table.add_row(p["name"], p.get("locale", ""), p.get("description", ""))
+        console.print(table)
+    elif action == "show":
+        if not name:
+            console.print("[red]Error:[/red] Preset name required.")
+            raise typer.Exit(code=1)
+        data = load_preset(name)
+        rprint(data)
+    else:
+        console.print(f"[red]Error:[/red] Unknown action {action!r}. Use: list, show")
+        raise typer.Exit(code=1)
+
+
+key_app = typer.Typer(help="Manage the encryption master key in the OS keychain.", no_args_is_help=True)
+app.add_typer(key_app, name="key")
+
+
+@key_app.command("set")
+def key_set():
+    """Generate and store a new 32-byte master key in the OS keychain."""
+    from pii_faker.core.crypto import keyring_set
+
+    keyring_set()
+    console.print("[green]Master key stored in keychain (service pii-faker, account master).[/green]")
+
+
+@key_app.command("show")
+def key_show():
+    """Show whether a master key exists (never prints the raw key)."""
+    from pii_faker.core.crypto import keyring_exists
+
+    if keyring_exists():
+        console.print("[green]Master key exists[/green] in keychain (pii-faker/master).")
+    else:
+        console.print("[yellow]No master key[/yellow] — run: pii-faker key set")
+
+
+@key_app.command("delete")
+def key_delete():
+    """Delete the master key from the OS keychain."""
+    from pii_faker.core.crypto import keyring_delete
+
+    if keyring_delete():
+        console.print("[green]Master key deleted.[/green]")
+    else:
+        console.print("[yellow]No key to delete, or delete failed.[/yellow]")
 
 
 @app.command()

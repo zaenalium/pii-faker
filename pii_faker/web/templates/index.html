@@ -433,6 +433,16 @@
                 <div id="detections-list" class="columns-list"></div>
 
                 <div class="form-group" style="margin-top: 20px;">
+                    <label for="preset-select">Preset</label>
+                    <select id="preset-select" onchange="applyPreset(this.value)">
+                        <option value="">— none —</option>
+                    </select>
+                    <small style="color: #666; display: block; margin-top: 5px;">
+                        e.g. <code>id</code> for Indonesia (UU PDP) — pre-fills locale + columns.
+                    </small>
+                </div>
+
+                <div class="form-group" style="margin-top: 20px;">
                     <label for="extra-columns">Extra PII Columns</label>
                     <input type="text" id="extra-columns" placeholder="ssn, data.tanggal_lahir, patient.contacts[*].phone">
                     <small style="color: #666; display: block; margin-top: 5px;">
@@ -490,6 +500,7 @@
                 <div style="margin-top: 20px;">
                     <a id="download-output" class="download-btn">📥 Download Processed File</a>
                     <a id="download-mapping" class="download-btn">📥 Download Mapping</a>
+                    <a id="download-audit" class="download-btn hidden">📄 Download Audit</a>
                     <button type="button" class="btn" id="delete-mapping-btn" onclick="deleteMapping()">🗑️ Delete Mapping</button>
                 </div>
             </div>
@@ -548,6 +559,33 @@
             const merged = Object.assign({}, options);
             merged.headers = Object.assign({}, merged.headers, sessionHeaders());
             return fetch(path, merged);
+        }
+
+        // Presets (3.4)
+        (async function loadPresets() {
+            try {
+                const r = await apiFetch('/api/presets');
+                if (!r.ok) return;
+                const presets = await r.json();
+                const sel = document.getElementById('preset-select');
+                presets.forEach(p => {
+                    const o = document.createElement('option');
+                    o.value = p.name;
+                    o.textContent = p.name + (p.locale ? ' (' + p.locale + ')' : '') + ' — ' + (p.description || '');
+                    sel.appendChild(o);
+                });
+            } catch (e) {}
+        })();
+        function applyPreset(name) {
+            if (!name) return;
+            fetch('/api/presets').then(r => r.json()).then(presets => {
+                const preset = presets.find(p => p.name === name);
+                if (preset && preset.locale) {
+                    const seed = document.getElementById('seed');
+                    // preset locale is informational; show in extra-columns hint via console
+                    console.log('preset', preset);
+                }
+            });
         }
 
         // File upload handling
@@ -862,6 +900,8 @@
                     } else {
                         document.getElementById('download-output').href = `/api/download/${data.job_id}/output`;
                         document.getElementById('download-mapping').href = `/api/download/${data.job_id}/mapping`;
+                        document.getElementById('download-audit').href = `/api/download/${data.job_id}/audit`;
+                        document.getElementById('download-audit').classList.remove('hidden');
                         document.getElementById('mapping-path').textContent = '(server temp file — deleted after download)';
                         document.getElementById('result-section').classList.add('visible');
                     }

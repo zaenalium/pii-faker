@@ -25,6 +25,9 @@ pip install -e ".[dev]"
 
 # Install for the macOS desktop app (needs a WebView)
 pip install -e ".[desktop]"
+
+# Install with encryption support (AES-GCM + keychain)
+pip install -e ".[enc]"
 ```
 
 ## Desktop App (macOS today, Windows next)
@@ -59,6 +62,18 @@ you close the window.
 ```bash
 # Fake PII in a CSV file
 pii-faker process data.csv --output processed.csv --mapping-out mapping.json
+
+# Encrypted mapping (AES-GCM — passphrase, env var, or OS keychain)
+pii-faker process data.csv --output processed.csv --mapping-out mapping.json --encrypt --passphrase s3cret
+pii-faker key set          # store a master key in the OS keychain
+pii-faker key show         # check whether a key exists (never prints it)
+
+# Indonesia preset (UU PDP: NIK/NPWP/BPJS + id_ID Faker locale)
+pii-faker process data.csv --preset id --output processed.csv --mapping-out mapping.json
+pii-faker presets list
+
+# PII-free audit next to the mapping (JSON + human text)
+pii-faker process data.csv --output processed.csv --mapping-out mapping.json --audit-out audit.json
 
 # Redact PII with partial style
 pii-faker process data.xlsx --mode redact --redact-style partial --output redacted.xlsx --mapping-out mapping.json

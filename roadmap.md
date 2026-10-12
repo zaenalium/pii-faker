@@ -130,13 +130,15 @@ value shapes; `username`/`company_name`/`filename` excluded; leak check flags
 a deselected PII column and is silent on a clean run.
 
 ### Phase 3: Safety and accountability (v0.5)
+*Status 2026-10-12: 3.1–3.4 implemented in code — crypto layer, format-probe
+expiry, PII-free audits, Indonesia preset. CLS/web/docs/manual E2E pending.*
 
-| ID | Task | Size | Notes |
-|----|------|------|-------|
-| 3.1 | Encrypted mapping files (AES-GCM via `cryptography`); key stored in macOS Keychain / Windows Credential Manager (`keyring`), with an optional passphrase | M | |
-| 3.2 | Auto-expiry: the app deletes mappings older than N days (setting); make `cleanup` find mappings by format, not filename | S | |
-| 3.3 | Audit report per run (JSON + human-readable): columns, counts, mode, seed, leak-check result, tool version. **Must contain no PII.** | S | |
-| 3.4 | Indonesia preset (UU PDP-oriented column set + `id_ID` locale + NIK/NPWP/BPJS detectors); keep the preset format generic so others can be added | S | |
+| ID | Task | Size | Notes | Status 2026-10-12 |
+|----|------|------|-------|-------------------|
+| 3.1 | Encrypted mapping files (AES-GCM via `cryptography`); key stored in macOS Keychain / Windows Credential Manager (`keyring`), with an optional passphrase | M | | 🟢 done in code (`core/crypto.py` AES-GCM envelope + `core/mapper.py` encrypt/decrypt + key hierarchy `pii-faker/master`; `pip install pii-faker[enc]`; CLI `--encrypt/--passphrase` + `key set/show/delete`; needs manual round-trip on a fixture before merge) |
+| 3.2 | Auto-expiry: the app deletes mappings older than N days (setting); make `cleanup` find mappings by format, not filename | S | | 🟢 done in code (`mapper.cleanup_old_mappings` format probe + `config.retention_days`/`auto_expire_mappings`; verifies non-`mapping_*` ours expire and alien `mapping_*.json` survive) |
+| 3.3 | Audit report per run (JSON + human-readable): columns, counts, mode, seed, leak-check result, tool version. **Must contain no PII.** | S | | 🟢 done in code (`core/audit.py` + `pipeline.process_sheets` writes `*_audit.json/.txt` next to the mapping; web `GET /api/download/{id}/audit`; verified `Budi` not in `grep -a` of the audit) |
+| 3.4 | Indonesia preset (UU PDP-oriented column set + `id_ID` locale + NIK/NPWP/BPJS detectors); keep the preset format generic so others can be added | S | | 🟢 done in code (`data/presets/id.yaml` + `core/presets.py` generic loader; `presets list/show` + `process --preset id`; locale preserved through audit) |
 
 ### Phase 4: LLM round-trip workflow (v0.6)
 

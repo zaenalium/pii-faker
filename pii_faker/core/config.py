@@ -41,6 +41,7 @@ class PIIConfig(BaseModel):
     json_columns: List[str] = Field(default_factory=list)
     strict_paths: bool = False
     locale: Optional[str] = None
+    preset: Optional[str] = None
 
     infer_schema_length: Optional[int] = 100
     sheets: Optional[str] = None
@@ -82,6 +83,54 @@ def user_config_path() -> Path:
     if _legacy_config_path().exists():
         return _legacy_config_path()
     return modern
+
+
+def get_retention_days(config_path: Optional[str] = None) -> Optional[float]:
+    """Retention for mapping files in days (roadmap 3.2).
+
+    Returns None when unset (default sweep is 7d via cleanup_old_mappings).
+    0 means keep forever.
+    """
+    import yaml
+
+    path = Path(config_path) if config_path else user_config_path()
+    if not path.exists():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        return None
+    val = data.get("retention_days")
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def set_retention_days(days: float, config_path: Optional[str] = None) -> None:
+    import yaml
+
+    path = Path(config_path) if config_path else user_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
+    except Exception:
+        data = {}
+    data["retention_days"] = float(days)
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+
+def auto_expire_mappings() -> int:
+    """Sweep mappings_dir() using retention_days (quiet, warn on deletion)."""
+    retention = get_retention_days()
+    if retention is None or retention == 0:
+        return 0
+    from pii_faker.core.mapper import PIIMapper
+
+    mapper = PIIMapper(PIIConfig())
+    return mapper.cleanup_old_mappings(str(mappings_dir()), older_than_days=float(retention))
 
 
 def load_user_extra_columns(config_path: Optional[str] = None) -> List[str]:
