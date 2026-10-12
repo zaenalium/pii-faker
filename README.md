@@ -186,6 +186,11 @@ pii-faker process data.csv --perturb-pct 5 --output pert.csv --mapping-out mappi
 pii-faker project init myproject --mapping proj.json
 pii-faker process a.csv --output a_out.csv --project-mapping proj.json --seed 1
 pii-faker process b.csv --output b_out.csv --project-mapping proj.json --seed 1
+
+# Local LLM proxy (Phase 5, exploratory): OpenAI-compatible scrub + restore on 127.0.0.1
+pii-faker proxy --upstream https://api.openai.com --port 11434
+# Point any OpenAI client at http://127.0.0.1:11434/v1
+# Scrub is deterministic detectors only (email/phone/NIK/BPJS/card/IBAN/IP/URL-creds) — prose names pass through.
 ```
 
 > Note: the web UI runs on localhost only and is designed for a single

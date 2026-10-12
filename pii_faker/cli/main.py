@@ -625,6 +625,24 @@ def cleanup(
 
 
 @app.command()
+def proxy(
+    upstream: str = typer.Option(..., "--upstream", help="Upstream OpenAI-compatible base URL"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind host (loopback only)"),
+    port: int = typer.Option(11434, "--port", "-p", help="Port to listen on"),
+):
+    """Local LLM proxy (Phase 5, exploratory): OpenAI-compatible scrub + restore on 127.0.0.1 only."""
+    if host != "127.0.0.1":
+        console.print("[yellow]Warning:[/yellow] proxy binds to loopback only; forcing 127.0.0.1")
+        host = "127.0.0.1"
+    import uvicorn
+    from pii_faker.proxy import create_proxy_app
+
+    proxy_app = create_proxy_app(upstream)
+    console.print(f"[bold]Proxy[/bold] {host}:{port} → {upstream}  (scrub/restore, session via X-PII-Session)")
+    uvicorn.run(proxy_app, host=host, port=port)
+
+
+@app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Host to bind to"),
     port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
