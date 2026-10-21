@@ -648,13 +648,28 @@ def proxy(
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Host to bind to"),
     port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
+    token: Optional[str] = typer.Option(
+        None, "--token", envvar="PII_FAKER_TOKEN",
+        help="Access token, at least 16 characters (prefer the PII_FAKER_TOKEN environment "
+             "variable: command lines are visible to other users). A random one is generated if omitted.",
+    ),
+    retention_minutes: float = typer.Option(
+        60.0, "--retention-minutes", min=1.0,
+        help="Delete a job's uploaded file, outputs and mapping after this many minutes without activity",
+    ),
 ):
-    """Start the web UI server."""
-    import uvicorn
-    from pii_faker.web.app import app as web_app
+    """Start the web UI (sign-in with an access token required)."""
+    from pii_faker.web.app import run_server
 
-    console.print(f"[bold]Starting[/bold] PII Faker web UI on {host}:{port}...")
-    uvicorn.run(web_app, host=host, port=port)
+    try:
+        # soft_wrap: never break the sign-in link across lines
+        run_server(
+            host, port, token, retention_minutes,
+            announce=lambda message: console.print(message, soft_wrap=True, markup=False, highlight=False),
+        )
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
