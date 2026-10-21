@@ -10,6 +10,7 @@ from pii_faker.core.generators import PIIGenerator, FakeDataGenerator
 from pii_faker.core.redactor import PIIRedactor, RedactionStyle
 from pii_faker.core.mapper import PIIMapper, MappingStore
 from pii_faker.core.restorer import PIIRestorer
+from pii_faker.core.processor import PIIProcessor
 from pii_faker.core.file_io import FileHandler
 from pii_faker.core.json_walker import JsonWalker
 from pii_faker.core.config import PIIConfig, PIIMode, MatchStrategy
@@ -24,6 +25,7 @@ __all__ = [
     "PIIMapper",
     "MappingStore",
     "PIIRestorer",
+    "PIIProcessor",
     "FileHandler",
     "JsonWalker",
     "PIIConfig",
@@ -38,7 +40,10 @@ def process_dataframe(
     mapping_out: str | None = None,
 ) -> tuple["pl.DataFrame", PIIMapper]:
     """
-    Process a DataFrame to fake or redact PII columns.
+    Process a DataFrame to fake or redact PII.
+
+    Covers flat columns, nested struct/list columns, and (via
+    `config.json_columns`) JSON documents stored as text.
 
     Args:
         df: Input Polars DataFrame
@@ -48,33 +53,13 @@ def process_dataframe(
     Returns:
         Tuple of (processed DataFrame, mapper with mappings)
     """
-    import polars as pl
-
-    detector = PIIColumnDetector(config)
-    pii_columns = detector.detect(df)
-
-    if not pii_columns:
-        return df, PIIMapper(config)
-
-    mapper = PIIMapper(config)
-
-    if config.mode == PIIMode.FAKE:
-        generator = PIIGenerator(config)
-        for col in pii_columns:
-            df, col_mapper = generator.process_column(df, col)
-            if col_mapper:
-                mapper.add_column_mapping(col['column'], col['category'], col_mapper)
-    else:
-        redactor = PIIRedactor(config)
-        for col in pii_columns:
-            df, col_mapper = redactor.process_column(df, col)
-            if col_mapper:
-                mapper.add_column_mapping(col['column'], col['category'], col_mapper)
+    processor = PIIProcessor(config)
+    df = processor.process(df)
 
     if mapping_out:
-        mapper.save(mapping_out)
+        processor.mapper.save(mapping_out)
 
-    return df, mapper
+    return df, processor.mapper
 
 
 def restore_dataframe(

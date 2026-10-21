@@ -3,33 +3,130 @@ PII Faker Web Application
 
 FastAPI-based web interface for PII processing.
 Provides file upload, detection preview, processing, and restore functionality.
+
+Every route except the sign-in page requires the access token (see auth.py).
+Uploads, outputs and mappings live in a private temp directory, are deleted
+after a period without activity, and are all removed when the server stops.
 """
 
-import uuid
+import asyncio
+import os
+import re
+import shutil
 import tempfile
-import json as json_module
+import time
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Callable, Dict, List, Optional
 
 import polars as pl
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from pii_faker.core.config import PIIConfig, PIIMode, RedactionStyle, MatchStrategy
 from pii_faker.core.detector import PIIColumnDetector
-from pii_faker.core.generators import PIIGenerator
-from pii_faker.core.redactor import PIIRedactor
-from pii_faker.core.mapper import PIIMapper
+from pii_faker.core.json_walker import JsonWalker
+from pii_faker.core.processor import PIIProcessor
 from pii_faker.core.restorer import PIIRestorer
+from pii_faker.core.mapper import PIIMapper
 from pii_faker.core.file_io import FileHandler
+from pii_faker.web.auth import (
+    TOKEN_ENV,
+    SESSION_COOKIE,
+    Authenticator,
+    session_cookie_options,
+)
+
+DEFAULT_RETENTION_MINUTES = 60
+
+# In-memory job storage. Single process only: sessions and jobs are not shared
+# between workers.
+jobs: Dict[str, Dict[str, Any]] = {}
+_job_root: Optional[Path] = None
+
+
+def _new_job_dir(prefix: str) -> Path:
+    """A private (0700) directory for one job, under a per-server root."""
+    global _job_root
+    if _job_root is None or not _job_root.exists():
+        _job_root = Path(tempfile.mkdtemp(prefix="pii_faker_web_"))
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=_job_root))
+
+
+def _store_job(job_id: str, **fields: Any) -> None:
+    jobs[job_id] = {**fields, "touched": time.time()}
+
+
+def _get_job(job_id: str) -> Dict[str, Any]:
+    """Look up a job and count the access as activity (it postpones expiry)."""
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job["touched"] = time.time()
+    return job
+
+
+def _drop_job(job_id: str) -> None:
+    job = jobs.pop(job_id, None)
+    if job:
+        shutil.rmtree(job["temp_dir"], ignore_errors=True)
+
+
+def purge_expired_jobs(max_age_seconds: float, now: Optional[float] = None) -> int:
+    """Delete jobs (and their files) idle for longer than `max_age_seconds`."""
+    now = time.time() if now is None else now
+    expired = [job_id for job_id, job in jobs.items() if now - job["touched"] > max_age_seconds]
+    for job_id in expired:
+        _drop_job(job_id)
+    return len(expired)
+
+
+def purge_all_jobs() -> None:
+    """Delete every job and the server's temp root."""
+    global _job_root
+    for job_id in list(jobs):
+        _drop_job(job_id)
+    if _job_root is not None:
+        shutil.rmtree(_job_root, ignore_errors=True)
+        _job_root = None
+
+
+def _safe_filename(filename: Optional[str], default: str) -> str:
+    """Strip any directory part from a client-supplied upload name."""
+    name = Path((filename or "").replace("\\", "/")).name
+    return name if name not in ("", ".", "..") else default
+
+
+async def _reap_expired_jobs(app: FastAPI) -> None:
+    while True:
+        retention = app.state.retention_seconds
+        await asyncio.sleep(max(1.0, min(60.0, retention / 2)))
+        purge_expired_jobs(retention)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    reaper = asyncio.create_task(_reap_expired_jobs(app))
+    try:
+        yield
+    finally:
+        reaper.cancel()
+        purge_all_jobs()
+
 
 app = FastAPI(
     title="PII Faker",
     description="PII Fake/Redact Toolkit - Web Interface",
     version="0.1.0",
+    lifespan=lifespan,
 )
+
+# Never open by default: a token is generated unless run_server() is given one.
+app.state.auth = Authenticator()
+app.state.retention_seconds = DEFAULT_RETENTION_MINUTES * 60
 
 # Setup static files and templates with absolute paths
 BASE_DIR = Path(__file__).resolve().parent
@@ -43,16 +140,85 @@ TEMPLATES_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-# In-memory job storage (for demo; production should use Redis/DB)
-jobs: Dict[str, Dict[str, Any]] = {}
+# Everything else needs authentication, including routes added later.
+PUBLIC_PATHS = {"/", "/login"}
+
+RESPONSE_HEADERS = {
+    "Cache-Control": "no-store",          # responses can contain PII
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+@app.middleware("http")
+async def require_authentication(request: Request, call_next):
+    authenticated = request.app.state.auth.is_authenticated(request)
+    if request.url.path in PUBLIC_PATHS or authenticated:
+        response = await call_next(request)
+    else:
+        response = JSONResponse(
+            {"detail": "Not authenticated"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    for name, value in RESPONSE_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
+
+
+def _login_page(error: Optional[str] = None) -> HTMLResponse:
+    html = templates.get_template("login.html").render(error=error)
+    return HTMLResponse(content=html, status_code=401)
+
+
+def _sign_in(request: Request) -> RedirectResponse:
+    auth = request.app.state.auth
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(value=auth.open_session(), **session_cookie_options(request, auth.session_seconds))
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    """Home page with file upload form."""
+async def home(request: Request, token: Optional[str] = None):
+    """Home page with file upload form (or the sign-in page)."""
+    auth = request.app.state.auth
+
+    if token is not None:
+        # Opened from the link printed at startup. Trade the token for a
+        # session cookie and redirect, so it doesn't linger in the address bar.
+        return _sign_in(request) if auth.check_token(token) else _login_page("That token is not valid.")
+
+    if not auth.is_authenticated(request):
+        return _login_page()
+
     template = templates.get_template("index.html")
     html_content = template.render(request=request)
     return HTMLResponse(content=html_content)
+
+
+@app.post("/login")
+async def login(request: Request, token: str = Form("")):
+    """Sign in with the access token."""
+    if request.app.state.auth.check_token(token):
+        return _sign_in(request)
+    return _login_page("That token is not valid.")
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    """End this browser session."""
+    request.app.state.auth.close_session(request.cookies.get(SESSION_COOKIE))
+    response = JSONResponse({"status": "signed out"})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str):
+    """Delete a job's uploaded file, outputs and mapping right away."""
+    _get_job(job_id)
+    _drop_job(job_id)
+    return JSONResponse({"status": "deleted"})
 
 
 @app.post("/api/detect")
@@ -63,11 +229,13 @@ async def detect_pii(
     override_defaults: bool = Form(False),
 ):
     """Detect PII columns in uploaded file."""
+    temp_dir = None
     try:
         # Save uploaded file temporarily
         job_id = str(uuid.uuid4())
-        temp_dir = Path(tempfile.mkdtemp(prefix="pii_faker_"))
-        input_path = temp_dir / file.filename
+        temp_dir = _new_job_dir("pii_faker_")
+        filename = _safe_filename(file.filename, "upload")
+        input_path = temp_dir / filename
 
         with open(input_path, "wb") as f:
             content = await file.read()
@@ -98,157 +266,62 @@ async def detect_pii(
             }
 
         # Store job info
-        jobs[job_id] = {
-            "input_path": str(input_path),
-            "temp_dir": str(temp_dir),
-            "filename": file.filename,
-            "config": config.model_dump(),
-            "sheets": list(all_detections.keys()),
-        }
+        _store_job(
+            job_id,
+            input_path=str(input_path),
+            temp_dir=str(temp_dir),
+            filename=filename,
+            config=config.model_dump(),
+            sheets=list(all_detections.keys()),
+        )
 
         return JSONResponse({
             "job_id": job_id,
             "detections": all_detections,
-            "filename": file.filename,
+            "filename": filename,
         })
 
     except Exception as e:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)    # don't leave the upload behind
         raise HTTPException(status_code=400, detail=str(e))
 
 
-def _process_sheet(df, flat_columns, json_columns, config, mapper):
-    """Process a single sheet, handling both flat and JSON string columns."""
-    # Process flat columns
-    if flat_columns:
-        detector = PIIColumnDetector(config)
-        pii_cols = [c for c in detector.detect(df) if c['column'] in flat_columns]
+def _selected_entries(df, columns: List[str], config: PIIConfig) -> List[Dict[str, Any]]:
+    """
+    Turn the fields ticked in the UI into entries for PIIProcessor.
 
-        if config.mode == PIIMode.FAKE:
-            generator = PIIGenerator(config)
-            for col_info in pii_cols:
-                df, col_mapping = generator.process_column(df, col_info)
-                mapper.add_column_mapping(col_info['column'], col_info['category'], col_mapping)
+    A key is a column name, a nested path (`patient.contacts[*].email`), or
+    `column:json.path` for a JSON document stored in a text column.
+    """
+    detected = {e['column']: e for e in PIIColumnDetector(config).detect_all(df)}
+
+    entries = []
+    for key in columns:
+        if key in detected:
+            entries.append(detected[key])
+        elif ':' in key and key not in df.columns:
+            column, path = key.split(':', 1)
+            path = re.sub(r'(\[\*\])+$', '', path)
+            if column in df.columns and JsonWalker.segments(path):
+                entries.append({
+                    'column': f"{column}:{path}",
+                    'json_column': column,
+                    'json_path': path,
+                    'category': _get_category_for_field(JsonWalker.segments(path)[-1], config),
+                    'pattern': path,
+                    'description': 'Selected in the web UI',
+                })
         else:
-            redactor = PIIRedactor(config)
-            for col_info in pii_cols:
-                df, col_mapping = redactor.process_column(df, col_info)
-                mapper.add_column_mapping(col_info['column'], col_info['category'], col_mapping)
-
-    # Process JSON string columns
-    if json_columns:
-        df = _process_json_columns(df, json_columns, config, mapper)
-
-    return df
-
-
-def _process_json_columns(df, json_columns, config, mapper):
-    """Process JSON string columns to fake/redact PII inside them."""
-    import re
-
-    # Group json_columns by parent column
-    # e.g., ["data:birth_date", "data:member_code"] -> {"data": ["birth_date", "member_code"]}
-    json_col_groups = {}
-    for col_path in json_columns:
-        parts = col_path.split(':', 1)
-        if len(parts) == 2:
-            parent_col, json_path = parts
-            if parent_col not in json_col_groups:
-                json_col_groups[parent_col] = []
-            json_col_groups[parent_col].append(json_path)
-
-    # Process each parent column
-    expressions = []
-    for parent_col, json_paths in json_col_groups.items():
-        if parent_col not in df.columns:
-            continue
-
-        # Build mapping for each json_path
-        path_mappings = {}
-        for json_path in json_paths:
-            # Collect unique values from the JSON path
-            unique_values = set()
-            for val in df[parent_col].drop_nulls().to_list():
-                if isinstance(val, str):
-                    try:
-                        parsed = json_module.loads(val)
-                        value = _get_nested_value(parsed, json_path)
-                        if value and isinstance(value, str):
-                            unique_values.add(value)
-                    except:
-                        continue
-
-            if not unique_values:
-                continue
-
-            # Generate mapping
-            if config.mode == PIIMode.FAKE:
-                generator = PIIGenerator(config)
-                field_name = json_path.split('.')[-1]
-                category = _get_category_for_field(field_name, config)
-                mapping = {}
-                for orig_val in sorted(unique_values):
-                    mapping[orig_val] = generator.generate_fake_value(orig_val, category, field_name)
-            else:
-                redactor = PIIRedactor(config)
-                mapping = {}
-                for orig_val in sorted(unique_values):
-                    if config.redact_style == RedactionStyle.FULL:
-                        mapping[orig_val] = "[REDACTED]"
-                    elif config.redact_style == RedactionStyle.PARTIAL:
-                        if len(orig_val) > 4:
-                            mapping[orig_val] = "X" * (len(orig_val) - 4) + orig_val[-4:]
-                        else:
-                            mapping[orig_val] = "X" * len(orig_val)
-                    else:
-                        mapping[orig_val] = f"REDACTED_{len(mapping)+1:04d}"
-
-            path_mappings[json_path] = mapping
-
-            # Add to mapper
-            full_path = f"{parent_col}:{json_path}"
-            mapper.add_column_mapping(full_path, category if config.mode == PIIMode.FAKE else "custom", mapping)
-
-        if path_mappings:
-            # Apply transformations using map_elements (slow path for JSON strings)
-            def transform_json(val):
-                if not isinstance(val, str):
-                    return val
-                try:
-                    parsed = json_module.loads(val)
-                    for json_path, mapping in path_mappings.items():
-                        current = parsed
-                        parts = json_path.split('.')
-                        for i, part in enumerate(parts):
-                            if i == len(parts) - 1:
-                                if part in current and isinstance(current[part], str):
-                                    if current[part] in mapping:
-                                        current[part] = mapping[current[part]]
-                            else:
-                                if part in current:
-                                    current = current[part]
-                                else:
-                                    break
-                    return json_module.dumps(parsed, separators=(',', ':'))
-                except:
-                    return val
-
-            df = df.with_columns(
-                pl.col(parent_col).map_elements(transform_json, return_dtype=pl.Utf8).alias(parent_col)
-            )
-
-    return df
-
-
-def _get_nested_value(data, path):
-    """Get a value from nested dict using dot notation."""
-    parts = path.split('.')
-    current = data
-    for part in parts:
-        if isinstance(current, dict) and part in current:
-            current = current[part]
-        else:
-            return None
-    return current
+            segments = JsonWalker.segments(key, df.schema)
+            if segments and segments[0] in df.columns:
+                entries.append({
+                    'column': key,
+                    'category': _get_category_for_field(segments[-1], config),
+                    'pattern': key,
+                    'description': 'Selected in the web UI',
+                })
+    return entries
 
 
 def _get_category_for_field(field_name, config):
@@ -522,10 +595,7 @@ async def process_file(
     seed: Optional[int] = Form(None),
 ):
     """Process file with selected PII columns."""
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    job = jobs[job_id]
+    job = _get_job(job_id)
     input_path = job["input_path"]
     temp_dir = Path(job["temp_dir"])
 
@@ -543,25 +613,22 @@ async def process_file(
         file_handler = FileHandler(config)
         data = file_handler.read(input_path)
 
-        # Process
-        mapper = PIIMapper(config)
-
-        # Separate columns into flat and json_nested
-        flat_columns = [c for c in columns if ':' not in c]
-        json_columns = [c for c in columns if ':' in c]
+        # One processor for the whole file: a value gets the same replacement
+        # in every column and sheet, and every replacement is distinct.
+        processor = PIIProcessor(config)
 
         if isinstance(data, dict):
-            processed = {}
-            for sheet_name, df in data.items():
-                df = _process_sheet(df, flat_columns, json_columns, config, mapper)
-                processed[sheet_name] = df
+            processed = {
+                sheet_name: processor.process(df, _selected_entries(df, columns, config))
+                for sheet_name, df in data.items()
+            }
         else:
-            data = _process_sheet(data, flat_columns, json_columns, config, mapper)
-            processed = data
+            processed = processor.process(data, _selected_entries(data, columns, config))
 
-        # Save output
+        # Save the mapping first, so a failure never leaves output we can't restore
         output_path = temp_dir / f"processed_{job['filename']}"
         mapping_path = temp_dir / f"mapping_{job_id}.json"
+        processor.mapper.save(str(mapping_path))
 
         if isinstance(processed, dict):
             for sheet_name, df in processed.items():
@@ -569,8 +636,6 @@ async def process_file(
                 file_handler.write(df, str(sheet_output))
         else:
             file_handler.write(processed, str(output_path))
-
-        mapper.save(str(mapping_path))
 
         # Update job
         job["output_path"] = str(output_path)
@@ -582,6 +647,8 @@ async def process_file(
             "status": "completed",
             "output_filename": f"processed_{job['filename']}",
             "mapping_filename": f"mapping_{job_id}.json",
+            # Selected fields that held no text, so were left as they were
+            "skipped": processor.skipped,
         })
 
     except Exception as e:
@@ -591,10 +658,7 @@ async def process_file(
 @app.get("/api/download/{job_id}/{file_type}")
 async def download_file(job_id: str, file_type: str):
     """Download processed file or mapping."""
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    job = jobs[job_id]
+    job = _get_job(job_id)
 
     if file_type == "output":
         file_path = job.get("output_path")
@@ -623,12 +687,15 @@ async def restore_file(
     is_text: bool = Form(False),
 ):
     """Restore original values from faked/redacted data."""
+    temp_dir = None
     try:
         # Save files temporarily
-        temp_dir = Path(tempfile.mkdtemp(prefix="pii_faker_restore_"))
+        temp_dir = _new_job_dir("pii_faker_restore_")
+        input_name = _safe_filename(input_file.filename, "input")
 
-        mapping_path = temp_dir / mapping_file.filename
-        input_path = temp_dir / input_file.filename
+        # Prefixed so the two uploads can't overwrite each other when they share a name
+        mapping_path = temp_dir / f"mapping_{_safe_filename(mapping_file.filename, 'mapping.json')}"
+        input_path = temp_dir / f"input_{input_name}"
 
         with open(mapping_path, "wb") as f:
             f.write(await mapping_file.read())
@@ -654,37 +721,37 @@ async def restore_file(
             if isinstance(df, dict):
                 for sheet_name, sheet_df in df.items():
                     restored_df = restorer.restore_dataframe(sheet_df)
-                    output_path = temp_dir / f"restored_{sheet_name}_{input_file.filename}"
+                    output_path = temp_dir / f"restored_{sheet_name}_{input_name}"
                     file_handler.write(restored_df, str(output_path))
             else:
                 restored_df = restorer.restore_dataframe(df)
-                output_path = temp_dir / f"restored_{input_file.filename}"
+                output_path = temp_dir / f"restored_{input_name}"
                 file_handler.write(restored_df, str(output_path))
 
         # Store for download
         restore_job_id = str(uuid.uuid4())
-        jobs[restore_job_id] = {
-            "output_path": str(output_path),
-            "temp_dir": str(temp_dir),
-        }
+        _store_job(
+            restore_job_id,
+            output_path=str(output_path),
+            temp_dir=str(temp_dir),
+        )
 
         return JSONResponse({
             "job_id": restore_job_id,
             "status": "completed",
-            "output_filename": f"restored_{input_file.filename}",
+            "output_filename": f"restored_{input_name}",
         })
 
     except Exception as e:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)    # don't leave the uploads behind
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/download/restore/{job_id}")
 async def download_restore(job_id: str):
     """Download restored file."""
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    job = jobs[job_id]
+    job = _get_job(job_id)
     output_path = job.get("output_path")
 
     if not output_path or not Path(output_path).exists():
@@ -697,6 +764,47 @@ async def download_restore(job_id: str):
     )
 
 
-if __name__ == "__main__":
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    token: Optional[str] = None,
+    retention_minutes: float = DEFAULT_RETENTION_MINUTES,
+    announce: Callable[[str], None] = print,
+) -> None:
+    """
+    Start the web UI.
+
+    Args:
+        token: Access token (min. 16 characters). Defaults to $PII_FAKER_TOKEN,
+            or a random one that is printed so you can open the link.
+        retention_minutes: How long a job's files are kept without activity.
+        announce: Where startup messages go.
+    """
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+
+    app.state.auth = Authenticator(token or os.environ.get(TOKEN_ENV) or None)
+    app.state.retention_seconds = int(retention_minutes * 60)
+
+    shown_host = "localhost" if host in ("0.0.0.0", "::") else host
+    url = f"http://{shown_host}:{port}"
+    if app.state.auth.generated:
+        announce(f"Open this link to sign in: {url}/?token={app.state.auth.token}")
+    else:
+        announce(f"Open {url} and sign in with your access token.")
+
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        announce(
+            f"Warning: listening on {host} over plain HTTP, so the token and your data travel "
+            "unencrypted. Put a TLS-terminating proxy in front before using this on a network."
+        )
+    unit = "minute" if retention_minutes == 1 else "minutes"
+    announce(
+        f"Uploads, outputs and mappings are deleted after {retention_minutes:g} {unit} "
+        "without activity, and when the server stops."
+    )
+
+    uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    run_server()

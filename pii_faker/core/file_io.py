@@ -30,6 +30,13 @@ class FileHandler:
     def __init__(self, config: PIIConfig):
         self.config = config
 
+    def _infer_length(self, override: Optional[int]) -> Optional[int]:
+        """Rows Polars samples to infer a JSON schema; None scans every row."""
+        value = override if override is not None else self.config.infer_schema_length
+        if value is None:
+            value = 100
+        return None if value == 0 else value
+
     def detect_format(self, path: str) -> str:
         """Detect file format from extension."""
         ext = Path(path).suffix.lower()
@@ -88,12 +95,8 @@ class FileHandler:
     ) -> Union[pl.DataFrame, Dict[str, pl.DataFrame]]:
         """Read Excel file. Returns dict if multiple sheets."""
         if all_sheets:
-            # Read all sheets
-            sheet_names = pl.read_excel(path, sheet_name=None).keys()
-            return {
-                name: pl.read_excel(path, sheet_name=name, engine='calamine')
-                for name in sheet_names
-            }
+            # sheet_id=0 reads every sheet into a {name: DataFrame} dict
+            return pl.read_excel(path, sheet_id=0, engine='calamine')
         elif sheets:
             # Read specified sheets
             sheet_list = [s.strip() for s in sheets.split(',')]
@@ -113,8 +116,7 @@ class FileHandler:
         infer_schema_length: Optional[int] = None,
     ) -> pl.DataFrame:
         """Read JSON file."""
-        if infer_schema_length is None:
-            infer_schema_length = self.config.infer_schema_length or 100
+        infer_schema_length = self._infer_length(infer_schema_length)
 
         try:
             return pl.read_json(path, infer_schema_length=infer_schema_length)
@@ -127,8 +129,7 @@ class FileHandler:
         infer_schema_length: Optional[int] = None,
     ) -> pl.DataFrame:
         """Read NDJSON/JSONL file."""
-        if infer_schema_length is None:
-            infer_schema_length = self.config.infer_schema_length or 100
+        infer_schema_length = self._infer_length(infer_schema_length)
 
         try:
             return pl.read_ndjson(path, infer_schema_length=infer_schema_length)

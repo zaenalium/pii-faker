@@ -48,6 +48,7 @@ class PIIRedactor:
         self,
         series: pl.Series,
         field_name: str = "",
+        reset_counter: bool = True,
     ) -> Dict[str, str]:
         """
         Build a mapping from original values to redacted values.
@@ -55,14 +56,18 @@ class PIIRedactor:
         Args:
             series: Polars Series with original values
             field_name: Name of the field
+            reset_counter: Restart token numbering at 1. Pass False when
+                redacting several columns in one run so tokens stay unique
+                across them (needed to restore free-form text).
 
         Returns:
             Dict mapping original -> redacted
         """
-        # Reset counter for consistent tokens per column
-        self.token_counter = 0
+        if reset_counter:
+            self.token_counter = 0
 
-        unique_values = series.drop_nulls().unique().to_list()
+        # Sorted so token numbers don't depend on Polars' unordered unique().
+        unique_values = sorted(series.drop_nulls().unique().to_list(), key=str)
 
         mapping = {}
         for original in unique_values:

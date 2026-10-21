@@ -560,6 +560,15 @@
             detectPII(file);
         }
 
+        // A 401 means the session expired or the server restarted: reload to reach sign-in.
+        async function apiFetch(url, options) {
+            const response = await fetch(url, options);
+            if (response.status === 401) {
+                window.location.reload();
+            }
+            return response;
+        }
+
         async function detectPII(file) {
             const formData = new FormData();
             formData.append('file', file);
@@ -568,7 +577,7 @@
             formData.append('override_defaults', false);
 
             try {
-                const response = await fetch('/api/detect', {
+                const response = await apiFetch('/api/detect', {
                     method: 'POST',
                     body: formData,
                 });
@@ -755,7 +764,7 @@
             if (seed) formData.append('seed', parseInt(seed));
 
             try {
-                const response = await fetch('/api/process', {
+                const response = await apiFetch('/api/process', {
                     method: 'POST',
                     body: formData,
                 });
@@ -768,6 +777,9 @@
                     document.getElementById('download-output').href = `/api/download/${data.job_id}/output`;
                     document.getElementById('download-mapping').href = `/api/download/${data.job_id}/mapping`;
                     document.getElementById('result-section').classList.add('visible');
+                    if (data.skipped && data.skipped.length) {
+                        alert('These selected fields hold no text, so they were left unchanged: ' + data.skipped.join(', '));
+                    }
                 } else {
                     alert('Error: ' + (data.detail || 'Processing failed'));
                 }
@@ -797,7 +809,7 @@
             formData.append('is_text', isText);
 
             try {
-                const response = await fetch('/api/restore', {
+                const response = await apiFetch('/api/restore', {
                     method: 'POST',
                     body: formData,
                 });

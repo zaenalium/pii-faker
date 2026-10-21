@@ -15,9 +15,7 @@ from rich.table import Table
 from rich import print as rprint
 
 from pii_faker.core.config import PIIConfig, PIIMode, RedactionStyle, MatchStrategy
-from pii_faker.core.detector import PIIColumnDetector
-from pii_faker.core.generators import PIIGenerator
-from pii_faker.core.redactor import PIIRedactor
+from pii_faker.core.processor import PIIProcessor
 from pii_faker.core.mapper import PIIMapper
 from pii_faker.core.restorer import PIIRestorer
 from pii_faker.core.file_io import FileHandler
@@ -47,6 +45,18 @@ def main(
     PII Faker - Detect, fake, or redact PII in datasets for LLM-safe data sharing.
     """
     pass
+
+
+def _saved_pii_columns() -> List[str]:
+    """Custom columns saved with `pii-faker columns add` in ~/.pii_faker/config.yaml."""
+    import yaml
+
+    config_file = Path.home() / ".pii_faker" / "config.yaml"
+    if not config_file.exists():
+        return []
+    with open(config_file, 'r') as f:
+        data = yaml.safe_load(f) or {}
+    return [str(c) for c in data.get('extra_pii_columns', [])]
 
 
 @app.command()
@@ -84,9 +94,10 @@ def process(
     """Process a file to fake or redact PII."""
 
     # Parse extra columns
-    extra_cols = []
+    # Columns saved with `pii-faker columns add` always apply, alongside --extra-pii-columns.
+    extra_cols = _saved_pii_columns()
     if extra_pii_columns:
-        extra_cols = [c.strip() for c in extra_pii_columns.split(',')]
+        extra_cols += [c.strip() for c in extra_pii_columns.split(',') if c.strip() not in extra_cols]
 
     json_cols = []
     if json_columns:
@@ -102,7 +113,7 @@ def process(
         override_defaults=override_defaults,
         json_columns=json_cols,
         strict_paths=strict_paths,
-        infer_schema_length=infer_schema_length if infer_schema_length != 0 else None,
+        infer_schema_length=infer_schema_length,
         sheets=sheets,
         all_sheets=all_sheets,
     )
@@ -120,18 +131,18 @@ def process(
         else:
             sheets_to_process = {"default": data}
 
-        # Detect PII columns
-        detector = PIIColumnDetector(config)
+        # Detect PII in flat, nested and JSON-string columns
+        processor = PIIProcessor(config)
         all_pii_columns = {}
 
         for sheet_name, df in sheets_to_process.items():
-            pii_cols = detector.detect(df)
+            pii_cols = processor.detect(df)
             if pii_cols:
                 all_pii_columns[sheet_name] = pii_cols
 
         # Dry run - just report findings
         if dry_run:
-            _print_dry_run(all_pii_columns, sheets_to_process)
+            _print_dry_run(processor, all_pii_columns, sheets_to_process)
             raise typer.Exit()
 
         if not all_pii_columns:
@@ -140,7 +151,6 @@ def process(
                 raise typer.Abort()
 
         # Process each sheet
-        mapper = PIIMapper(config)
         processed_sheets = {}
 
         for sheet_name, df in sheets_to_process.items():
@@ -150,23 +160,24 @@ def process(
                 continue
 
             console.print(f"[bold]Processing[/bold] sheet '{sheet_name}'...")
+            processed_sheets[sheet_name] = processor.process(df, pii_cols)
 
-            if config.mode == PIIMode.FAKE:
-                generator = PIIGenerator(config)
-                for col_info in pii_cols:
-                    df, col_mapping = generator.process_column(df, col_info)
-                    mapper.add_column_mapping(
-                        col_info['column'], col_info['category'], col_mapping
-                    )
-            else:
-                redactor = PIIRedactor(config)
-                for col_info in pii_cols:
-                    df, col_mapping = redactor.process_column(df, col_info)
-                    mapper.add_column_mapping(
-                        col_info['column'], col_info['category'], col_mapping
-                    )
+        if processor.skipped:
+            console.print(
+                "[yellow]Warning:[/yellow] matched as PII but left unchanged (no text values "
+                f"at that name or path): {', '.join(processor.skipped)}"
+            )
 
-            processed_sheets[sheet_name] = df
+        # Save the mapping before writing any output, so a failure here (bad
+        # path, ambiguous mapping) never leaves processed data we can't restore.
+        if mapping_out:
+            processor.mapper.save(mapping_out)
+            console.print(f"[bold]Mapping saved[/bold] to {mapping_out}")
+        elif all_pii_columns and processor.mapper.is_lossless_mode():
+            console.print(
+                "[yellow]Warning:[/yellow] no --mapping-out given, so the original values "
+                "cannot be restored later."
+            )
 
         # Write output
         console.print(f"[bold]Writing[/bold] {output}...")
@@ -183,11 +194,6 @@ def process(
                 )
                 file_handler.write(df, sheet_output)
 
-        # Save mapping
-        if mapping_out:
-            mapper.save(mapping_out)
-            console.print(f"[bold]Mapping saved[/bold] to {mapping_out}")
-
         console.print("[bold green]Done![/bold green]")
 
     except (typer.Exit, typer.Abort):
@@ -198,6 +204,7 @@ def process(
 
 
 def _print_dry_run(
+    processor: PIIProcessor,
     all_pii_columns: dict,
     sheets: dict,
 ):
@@ -209,26 +216,21 @@ def _print_dry_run(
     table.add_column("Pattern Match", style="blue")
     table.add_column("Unique Values", justify="right")
 
+    total_unique = 0
     for sheet_name, pii_cols in all_pii_columns.items():
         df = sheets[sheet_name]
         for col_info in pii_cols:
-            col_name = col_info['column']
-            unique_count = df[col_name].n_unique()
+            unique_count = processor.unique_count(df, col_info)
+            total_unique += unique_count
             table.add_row(
                 sheet_name,
-                col_name,
+                col_info['column'],
                 col_info['category'],
                 col_info['pattern'],
                 str(unique_count),
             )
 
     console.print(table)
-
-    total_unique = 0
-    for sheet_name, pii_cols in all_pii_columns.items():
-        df = sheets[sheet_name]
-        for col_info in pii_cols:
-            total_unique += df[col_info['column']].n_unique()
 
     console.print(f"\n[bold]Total unique PII values to process:[/bold] {total_unique}")
 
@@ -360,13 +362,15 @@ def columns_command(
 @app.command()
 def cleanup(
     older_than: str = typer.Option("7d", "--older-than", help="Delete mappings older than (e.g., 7d, 24h)"),
-    directory: str = typer.Option(
-        str(Path.home() / ".pii_faker" / "mappings"),
-        "--directory", "-d", help="Mappings directory"
+    directory: Optional[str] = typer.Option(
+        None, "--directory", "-d", help="Mappings directory (default: ~/.pii_faker/mappings)"
     ),
 ):
-    """Clean up old mapping files."""
+    """Delete old mapping files (mapping*.json, mapping*.db, mapping*.sqlite)."""
     from datetime import timedelta
+
+    if directory is None:
+        directory = str(Path.home() / ".pii_faker" / "mappings")
 
     # Parse time delta (supports days and hours, incl. fractional)
     try:
@@ -382,22 +386,37 @@ def cleanup(
 
     config = PIIConfig()
     mapper = PIIMapper(config)
-    mapper.cleanup_old_mappings(directory, older_than_days)
+    deleted = mapper.cleanup_old_mappings(directory, older_than_days)
 
-    console.print(f"[green]Cleaned up mappings older than {older_than}[/green]")
+    console.print(f"[green]Deleted {len(deleted)} mapping file(s) older than {older_than}[/green]")
 
 
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Host to bind to"),
     port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
+    token: Optional[str] = typer.Option(
+        None, "--token", envvar="PII_FAKER_TOKEN",
+        help="Access token, at least 16 characters (prefer the PII_FAKER_TOKEN environment "
+             "variable: command lines are visible to other users). A random one is generated if omitted.",
+    ),
+    retention_minutes: float = typer.Option(
+        60.0, "--retention-minutes", min=1.0,
+        help="Delete a job's uploaded file, outputs and mapping after this many minutes without activity",
+    ),
 ):
-    """Start the web UI server."""
-    import uvicorn
-    from pii_faker.web.app import app as web_app
+    """Start the web UI (sign-in with an access token required)."""
+    from pii_faker.web.app import run_server
 
-    console.print(f"[bold]Starting[/bold] PII Faker web UI on {host}:{port}...")
-    uvicorn.run(web_app, host=host, port=port)
+    try:
+        # soft_wrap: never break the sign-in link across lines
+        run_server(
+            host, port, token, retention_minutes,
+            announce=lambda message: console.print(message, soft_wrap=True, markup=False, highlight=False),
+        )
+    except ValueError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

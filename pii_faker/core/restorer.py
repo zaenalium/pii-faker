@@ -2,13 +2,17 @@
 PII restoration module.
 
 Restores original values from faked/redacted data using mappings.
-Uses Polars str.replace_many() for efficient batch replacement.
+
+Tabular cells are restored by exact match on the whole value. Substring
+replacement would corrupt data whenever one fake is a prefix of another
+(fake "123" inside fake "1234"), which fixed-width identifiers make common.
 """
 
 from typing import Dict, Any, Optional, List, Union
 
 import polars as pl
 
+from pii_faker.core.json_walker import JsonWalker
 from pii_faker.core.mapper import PIIMapper
 
 
@@ -28,10 +32,7 @@ class PIIRestorer:
 
     def restore_series(self, series: pl.Series, column: Optional[str] = None) -> pl.Series:
         """
-        Restore a Polars Series using str.replace_many().
-
-        This uses Aho-Corasick algorithm for efficient multi-pattern replacement
-        in a single pass, rather than iterated regex.
+        Restore a Polars Series by exact match on each value.
 
         Args:
             series: Series with faked/redacted values
@@ -49,15 +50,15 @@ class PIIRestorer:
         if not reverse_map:
             return series
 
-        # Use str.replace_many for efficient batch replacement
-        patterns = list(reverse_map.keys())
-        replacements = [reverse_map[p] for p in patterns]
-
-        return series.str.replace_many(patterns, replacements)
+        return series.replace(reverse_map)
 
     def restore_dataframe(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Restore all mapped columns in a DataFrame.
+
+        Handles flat columns, nested struct/list columns (mapping key is the
+        path, e.g. `patient.contacts[*].email`) and JSON documents stored in
+        text cells (mapping key is `column:json.path`).
 
         Args:
             df: DataFrame with faked/redacted values
@@ -65,29 +66,28 @@ class PIIRestorer:
         Returns:
             DataFrame with original values restored
         """
-        if not self._reverse_mapping:
-            return df
+        json_rules: Dict[str, List] = {}
 
-        # Get list of columns that have mappings
-        mapped_columns = list(self._reverse_by_column.keys())
-        columns_to_restore = [c for c in mapped_columns if c in df.columns]
+        for key, reverse_map in self._reverse_by_column.items():
+            if not reverse_map:
+                continue
 
-        if not columns_to_restore:
-            return df
+            if key not in df.columns and ':' in key:
+                column, path = key.split(':', 1)
+                if column in df.columns and df.schema[column] == pl.String:
+                    json_rules.setdefault(column, []).append((path, reverse_map))
+                continue
 
-        # Apply restoration to each mapped column
-        expressions = []
-        for col in columns_to_restore:
-            reverse_map = self._reverse_by_column[col]
-            if reverse_map:
-                patterns = list(reverse_map.keys())
-                replacements = [reverse_map[p] for p in patterns]
-                expressions.append(
-                    pl.col(col).str.replace_many(patterns, replacements).alias(col)
-                )
+            if key in df.columns and df.schema[key] == pl.String:
+                df = df.with_columns(pl.col(key).replace(reverse_map))
+                continue
 
-        if expressions:
-            df = df.with_columns(expressions)
+            expr = JsonWalker.rewrite_expr(df.schema, key, reverse_map)
+            if expr is not None:
+                df = df.with_columns(expr)
+
+        for column, rules in json_rules.items():
+            df = JsonWalker.rewrite_json_column(df, column, rules)
 
         return df
 
@@ -142,78 +142,5 @@ class PIIRestorer:
             return data
 
     def restore_ndjson(self, df: pl.DataFrame) -> pl.DataFrame:
-        """
-        Restore values in NDJSON DataFrame with nested structures.
-
-        Handles nested structs and lists by walking the schema.
-
-        Args:
-            df: NDJSON DataFrame with nested structures
-
-        Returns:
-            DataFrame with restored values
-        """
-        if not self._reverse_mapping:
-            return df
-
-        # Build expressions for each column based on its type
-        expressions = []
-        for col_name, col_type in df.schema.items():
-            expr = self._build_restore_expr(pl.col(col_name), col_type, col_name)
-            if expr is not None:
-                expressions.append(expr.alias(col_name))
-
-        if expressions:
-            df = df.with_columns(expressions)
-
-        return df
-
-    def _build_restore_expr(
-        self,
-        expr: pl.Expr,
-        dtype: pl.DataType,
-        path: str,
-    ) -> Optional[pl.Expr]:
-        """Build a restore expression for a column based on its type."""
-        # Check if this path has a mapping
-        reverse_map = self._reverse_by_column.get(path, {})
-
-        if isinstance(dtype, pl.Utf8) and reverse_map:
-            patterns = list(reverse_map.keys())
-            replacements = [reverse_map[p] for p in patterns]
-            return expr.str.replace_many(patterns, replacements)
-
-        elif isinstance(dtype, pl.Struct):
-            # For structs, recurse into fields
-            field_exprs = []
-            for field in dtype.fields:
-                field_expr = self._build_restore_expr(
-                    expr.struct.field(field.name),
-                    field.dtype,
-                    f"{path}.{field.name}",
-                )
-                if field_expr is not None:
-                    field_exprs.append(field_expr.struct(field.name))
-
-            if field_exprs:
-                return expr.struct.with_fields(field_exprs)
-
-        elif isinstance(dtype, pl.List) and isinstance(dtype.inner, pl.Struct):
-            # For list of structs, use list.eval to restore each element
-            inner_struct = dtype.inner
-            field_exprs = []
-            for field in inner_struct.fields:
-                field_expr = self._build_restore_expr(
-                    pl.element().struct.field(field.name),
-                    field.dtype,
-                    f"{path}[*].{field.name}",
-                )
-                if field_expr is not None:
-                    field_exprs.append(field_expr.struct(field.name))
-
-            if field_exprs:
-                return expr.list.eval(
-                    pl.element().struct.with_fields(field_exprs)
-                )
-
-        return None
+        """Restore a DataFrame read from NDJSON (nested columns are handled by restore_dataframe)."""
+        return self.restore_dataframe(df)
