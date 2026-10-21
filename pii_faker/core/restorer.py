@@ -8,7 +8,7 @@ replacement would corrupt data whenever one fake is a prefix of another
 (fake "123" inside fake "1234"), which fixed-width identifiers make common.
 """
 
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 import polars as pl
 
@@ -104,8 +104,12 @@ class PIIRestorer:
         Returns:
             Text with original values restored
         """
+        return self.restore_text_counted(text)[0]
+
+    def restore_text_counted(self, text: str) -> Tuple[str, int]:
+        """Like restore_text, also returning how many values were replaced."""
         if not self._reverse_mapping:
-            return text
+            return text, 0
 
         # Sort by length descending to replace longer patterns first
         # This prevents partial replacements (e.g., "REDACTED_001" being partially replaced)
@@ -116,11 +120,13 @@ class PIIRestorer:
         )
 
         result = text
+        replaced = 0
         for pattern in sorted_patterns:
-            original = self._reverse_mapping[pattern]
-            result = result.replace(pattern, original)
-
-        return result
+            found = result.count(pattern)
+            if found:
+                result = result.replace(pattern, self._reverse_mapping[pattern])
+                replaced += found
+        return result, replaced
 
     def restore_json(self, data: Any) -> Any:
         """

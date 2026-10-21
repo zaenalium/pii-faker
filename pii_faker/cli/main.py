@@ -419,5 +419,152 @@ def serve(
         raise typer.Exit(code=1)
 
 
+def _print_mcp_report(err: Console, reports: list) -> None:
+    """What each dataset exposes to the model. Column names only, never values."""
+    for report in reports:
+        table = Table(title=f"Dataset '{report.name}' ({report.rows} rows): what the model can see")
+        table.add_column("Column / field", style="green")
+        table.add_column("Exposed as", style="yellow")
+        for key in report.faked:
+            if key not in report.blocked:
+                table.add_row(key, "faked")
+        for key in report.kept:
+            table.add_row(key, "[red]original values[/red] (kept)")
+        for key in report.pruned:
+            table.add_row(key, "dropped (inside an exposed column)")
+        for key in report.dropped:
+            note = "dropped: looks like PII but holds no text" if key in report.blocked else "dropped"
+            table.add_row(key, note)
+        err.print(table)
+
+
+@app.command("mcp")
+def mcp_command(
+    dataset: List[str] = typer.Option(
+        ..., "--dataset", "-d", help="name=path/to/file. Repeat for several. The model only ever sees the name."
+    ),
+    keep: Optional[str] = typer.Option(
+        None, "--keep",
+        help="Comma-separated columns or nested paths to expose with their ORIGINAL values. "
+             "Everything not faked and not listed here is dropped.",
+    ),
+    keep_unmatched: bool = typer.Option(
+        False, "--keep-unmatched",
+        help="Expose every column the detector did not recognise, as-is. NOT recommended for an "
+             "untrusted provider: the detector only reads column names.",
+    ),
+    mode: PIIMode = typer.Option(PIIMode.FAKE, "--mode", help="fake (default) or redact"),
+    redact_style: RedactionStyle = typer.Option(
+        RedactionStyle.FULL, "--redact-style", help="full or token (partial is refused: it leaks characters)"
+    ),
+    match_strategy: MatchStrategy = typer.Option(MatchStrategy.NORMALIZED, "--match-strategy"),
+    seed: Optional[int] = typer.Option(None, "--seed", "-s", help="Random seed for reproducible fakes"),
+    extra_pii_columns: Optional[str] = typer.Option(
+        None, "--extra-pii-columns", "-e", help="Comma-separated extra PII columns/paths to fake"
+    ),
+    override_defaults: bool = typer.Option(False, "--override-defaults", help="Ignore the built-in column names"),
+    json_columns: Optional[str] = typer.Option(None, "--json-columns", "-j", help="Columns holding JSON text"),
+    strict_paths: bool = typer.Option(False, "--strict-paths", help="Bare names match top-level fields only"),
+    infer_schema_length: Optional[int] = typer.Option(100, "--infer-schema-length", help="0 reads every row"),
+    mapping_out: Optional[str] = typer.Option(
+        None, "--mapping-out", "-m",
+        help="Save the real<->fake mapping here (private file, never exposed to the model) so you can restore later",
+    ),
+    restore_dir: Optional[str] = typer.Option(
+        None, "--restore-dir",
+        help="Enable a tool that restores real values into text and saves it in this folder. "
+             "The model only gets a count back. Never expose this folder to the model.",
+    ),
+    max_rows: int = typer.Option(100, "--max-rows", min=1, help="Most rows any tool call returns"),
+    transport: str = typer.Option("stdio", "--transport", help="stdio (local) or http (remote / tunnel)"),
+    host: str = typer.Option("127.0.0.1", "--host", help="http only: address to bind"),
+    port: int = typer.Option(8765, "--port", "-p", help="http only: port"),
+    token: Optional[str] = typer.Option(
+        None, "--token", envvar="PII_FAKER_MCP_TOKEN",
+        help="http only: access token, at least 16 characters (prefer the PII_FAKER_MCP_TOKEN environment "
+             "variable). Generated and printed if omitted.",
+    ),
+    allowed_host: List[str] = typer.Option(
+        [], "--allowed-host",
+        help="http only: a hostname the server may be reached by, such as your tunnel's. Repeatable.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what the model would see, then exit"),
+):
+    """Serve datasets to an LLM over MCP with all PII faked (safe for untrusted providers)."""
+    import importlib.util
+
+    err = Console(stderr=True)      # stdout carries the protocol in stdio mode
+
+    if importlib.util.find_spec("mcp") is None:
+        err.print("[bold red]Error:[/bold red] the MCP SDK is not installed. Run: pip install 'pii-faker[mcp]'")
+        raise typer.Exit(code=1)
+    if transport not in ("stdio", "http"):
+        err.print("[bold red]Error:[/bold red] --transport must be stdio or http.")
+        raise typer.Exit(code=1)
+
+    from pii_faker.mcp_server import Gateway, parse_dataset_specs, run_gateway
+
+    try:
+        sources = parse_dataset_specs(dataset)
+
+        extra_cols = _saved_pii_columns()
+        if extra_pii_columns:
+            extra_cols += [c.strip() for c in extra_pii_columns.split(',') if c.strip() not in extra_cols]
+
+        config = PIIConfig(
+            mode=mode,
+            redact_style=redact_style,
+            match_strategy=match_strategy,
+            seed=seed,
+            extra_pii_columns=extra_cols,
+            override_defaults=override_defaults,
+            json_columns=[c.strip() for c in json_columns.split(',')] if json_columns else [],
+            strict_paths=strict_paths,
+            infer_schema_length=infer_schema_length,
+        )
+        gateway = Gateway(
+            config,
+            keep=keep.split(',') if keep else [],
+            keep_unmatched=keep_unmatched,
+            max_rows=max_rows,
+            restore_dir=Path(restore_dir) if restore_dir else None,
+        )
+        for name, path in sources.items():
+            err.print(f"[bold]Loading[/bold] {name} from {path}...")
+            gateway.add_dataset(name, path)
+
+        _print_mcp_report(err, gateway.reports())
+        if gateway.processor.skipped:
+            err.print(
+                "[yellow]Warning:[/yellow] matched as PII but holds no text, so it is NOT shown to the model: "
+                + ", ".join(gateway.processor.skipped)
+            )
+        if keep_unmatched:
+            err.print("[yellow]Warning:[/yellow] --keep-unmatched exposes every unrecognised column as-is.")
+
+        if dry_run:
+            err.print("Dry run: nothing is being served.")
+            raise typer.Exit()
+
+        if mapping_out:
+            gateway.save_mapping(mapping_out)
+            err.print(f"[bold]Mapping saved[/bold] to {mapping_out} (not visible to the model)")
+        elif not gateway.can_restore and gateway.processor.mapper.is_lossless_mode():
+            err.print("[yellow]Warning:[/yellow] no --mapping-out or --restore-dir: the real values can't be "
+                      "recovered once this server stops.")
+
+        err.print(f"[bold green]Serving[/bold green] {len(sources)} dataset(s) over {transport}. "
+                  "Stop with Ctrl+C.")
+        run_gateway(
+            gateway, transport, host, port, token, allowed_host,
+            announce=lambda message: err.print(message, soft_wrap=True, markup=False, highlight=False),
+        )
+    except (typer.Exit, typer.Abort):
+        raise
+    except ValueError as e:
+        err.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()
