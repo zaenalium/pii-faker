@@ -188,9 +188,14 @@ def plan_dataframe(
             return True
         return _in_selected(path) or column in selected_set
 
+    # Columns handled as JSON documents are processed leaf by leaf (below), never as one
+    # flat value: value detection sees the email inside the text and would replace the
+    # whole document with a single fake email.
+    json_handled = set(config.json_columns or []) | {w.partition(":")[0] for w in wanted if ":" in w}
+
     # Flat columns (skip struct/list tops; those are covered by nested paths)
     for col_name, dtype in df.schema.items():
-        if isinstance(dtype, (pl.Struct, pl.List)):
+        if isinstance(dtype, (pl.Struct, pl.List)) or col_name in json_handled:
             continue
         info = flat_infos.get(col_name)
         value_info = value_infos.get(col_name)

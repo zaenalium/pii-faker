@@ -267,3 +267,32 @@ class TestLeakCheckSeesInsideLists:
         report = check_processed_frame(
             processed, originals={"a@b.com"}, processed_paths={"patient.contacts[*].email", "patient.patient_name"})
         assert report.clean
+
+
+class TestJsonColumnsKeepTheirStructure:
+    """A JSON column containing an email was value-detected as one flat email column, and every
+    document was replaced by a single fake email. It still restored exactly."""
+
+    @staticmethod
+    def frame():
+        import json
+        return pl.DataFrame({"id": [1, 2], "payload": [
+            json.dumps({"email": "zelda@canary.test", "diagnosis": "asthma", "meta": {"phone": "5550142", "ward": "w1"}}),
+            json.dumps({"email": "orson@canary.test", "diagnosis": "flu"}),
+        ]})
+
+    def test_documents_stay_documents_with_only_the_pii_faked(self):
+        import json
+        processed, mapper = run(self.frame(), json_columns=["payload"])
+        first = json.loads(processed["payload"][0])
+        assert set(first) == {"email", "diagnosis", "meta"} and set(first["meta"]) == {"phone", "ward"}
+        assert first["email"] != "zelda@canary.test" and first["meta"]["phone"] != "5550142"
+        assert first["diagnosis"] == "asthma" and first["meta"]["ward"] == "w1"
+        assert restore_dataframe(processed, mapper)["payload"].to_list() == self.frame()["payload"].to_list()
+
+    def test_selected_json_paths_behave_the_same(self):
+        import json
+        processed, _ = process_dataframe(
+            self.frame(), PIIConfig(seed=1), selected=["payload:email", "payload:meta.phone"])
+        first = json.loads(processed["payload"][0])
+        assert first["diagnosis"] == "asthma" and first["email"] != "zelda@canary.test"
