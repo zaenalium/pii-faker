@@ -16,6 +16,7 @@ The check returns a LeakReport (no PII values included — only counts, paths
 and detector names, so the report itself is safe to log).
 """
 
+import warnings
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Dict, List, Optional, Set
 
@@ -66,6 +67,20 @@ def _iter_string_leaves(df: pl.DataFrame, prefix: str = ""):
                 yield from _iter_string_leaves(
                     sub.rename({"__v": f.name}), path
                 )
+        elif isinstance(dtype, pl.List) and isinstance(dtype.inner, pl.Struct):
+            # A list of structs: descend into the fields, as for a plain struct. Treating
+            # the elements as text (below) compared whole structs, so an original inside
+            # one could never be an exact hit and a processed list was flagged by shape.
+            try:
+                with warnings.catch_warnings():
+                    # explode()'s empty-list default is changing; null rows are dropped anyway.
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    elements = df.select(pl.col(col_name).explode().alias("__v"))
+            except Exception:
+                continue
+            for f in dtype.inner.fields:
+                sub = elements.select(pl.col("__v").struct.field(f.name).alias(f.name))
+                yield from _iter_string_leaves(sub, f"{path}[*]")
         elif isinstance(dtype, pl.List):
             try:
                 exploded = df.select(

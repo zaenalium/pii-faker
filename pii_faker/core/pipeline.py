@@ -157,7 +157,9 @@ def plan_dataframe(
 
     if selected is not None:
         wanted = [s.strip() for s in selected if s and s.strip()]
-        selected_set = set(wanted)
+        # `a.b.c` and `a.b[*].c` name the same field: the web UI offers the first form
+        # while nested targets carry the second, so accept either.
+        selected_set = set(wanted) | {s.replace("[*]", "") for s in wanted}
         has_explicit_nested = any("." in s or "[*]" in s or ":" in s for s in wanted)
     else:
         wanted = []
@@ -178,10 +180,13 @@ def plan_dataframe(
         )
     }
 
+    def _in_selected(path: str) -> bool:
+        return path in selected_set or path.replace("[*]", "") in selected_set
+
     def _selected(path: str, column: str) -> bool:
         if selected is None:
             return True
-        return path in selected_set or column in selected_set
+        return _in_selected(path) or column in selected_set
 
     # Flat columns (skip struct/list tops; those are covered by nested paths)
     for col_name, dtype in df.schema.items():
@@ -236,7 +241,7 @@ def plan_dataframe(
             continue
         if selected is not None and not has_explicit_nested:
             continue
-        if selected is not None and path not in selected_set and top not in selected_set:
+        if selected is not None and not _in_selected(path) and top not in selected_set:
             continue
         if config.strict_paths and "." in path and not path.startswith(top + "."):
             continue
@@ -258,7 +263,7 @@ def plan_dataframe(
             df, list(config.extra_pii_columns or []), detector
         )
         for target in extra_targets:
-            if selected is not None and target.path not in selected_set:
+            if selected is not None and not _in_selected(target.path):
                 continue
             if any(t.path == target.path for t in plan.targets):
                 continue
@@ -284,7 +289,7 @@ def plan_dataframe(
             df, parent, detector, json_selected.get(parent)
         ):
             full = f"{parent}:{jpath}"
-            if selected is not None and full not in selected_set and parent not in selected_set:
+            if selected is not None and not _in_selected(full) and parent not in selected_set:
                 if not json_selected.get(parent):
                     continue
             if any(t.path == full for t in plan.targets):

@@ -245,11 +245,13 @@ class PIIColumnDetector:
                 pii_paths.extend(
                     self.detect_nested_paths(nested_schema, current_path, json_columns)
                 )
-            # Recurse into list of structs
+            # Recurse into list of structs. The `[*]` marker is part of the path:
+            # applying and restoring look fields up by it, so a path without it
+            # was planned, mapped and then silently never applied.
             elif hasattr(field_type, 'inner') and hasattr(field_type.inner, 'fields'):
                 nested_schema = {f.name: f.dtype for f in field_type.inner.fields}
                 pii_paths.extend(
-                    self.detect_nested_paths(nested_schema, current_path, json_columns)
+                    self.detect_nested_paths(nested_schema, f"{current_path}[*]", json_columns)
                 )
 
         return pii_paths

@@ -193,3 +193,77 @@ class TestAmbiguousMappings:
         assert PIIMapper(PIIConfig(mode="fake")).is_lossless_mode()
         assert PIIMapper(PIIConfig(mode="redact", redact_style="typed-token")).is_lossless_mode()
         assert not PIIMapper(PIIConfig(mode="redact", redact_style="full")).is_lossless_mode()
+
+
+class TestNestedListsAreProcessed:
+    """Auto-detected fields inside a list of structs were mapped, saved and then never applied:
+    the output kept the real values, the mapping claimed they were faked, and an unchanged
+    column "restores exactly", so the round-trip tests could not see it."""
+
+    @staticmethod
+    def frame():
+        return pl.DataFrame([
+            {"patient": {"patient_name": "John Smith",
+                         "contacts": [{"email": "a@b.com"}, {"email": "c@d.com"}]}, "id": 1},
+            {"patient": {"patient_name": "Jane Doe", "contacts": [{"email": "e@f.com"}]}, "id": 2},
+        ])
+
+    @staticmethod
+    def emails(frame):
+        return [item["email"] for row in frame["patient"].to_list() for item in row["contacts"]]
+
+    def test_auto_detected_list_fields_are_faked(self):
+        original = self.frame()
+        processed, mapper = run(original)
+        assert not set(self.emails(processed)) & set(self.emails(original))
+        assert [r["patient_name"] for r in processed["patient"].to_list()] != ["John Smith", "Jane Doe"]
+        assert restore_dataframe(processed, mapper).equals(original)
+
+    @pytest.mark.parametrize("selected", [
+        ["patient.patient_name", "patient.contacts[*].email"],
+        ["patient.patient_name", "patient.contacts.email"],            # the form the web UI offers
+    ])
+    def test_selected_list_fields_are_faked_in_either_notation(self, selected):
+        original = self.frame()
+        processed, mapper = process_dataframe(original, PIIConfig(seed=1), selected=selected)
+        assert not set(self.emails(processed)) & set(self.emails(original))
+        assert restore_dataframe(processed, mapper).equals(original)
+
+    def test_detected_paths_carry_the_list_marker(self):
+        from pii_faker.core.pipeline import plan_dataframe
+        paths = [t.path for t in plan_dataframe(self.frame(), PIIConfig(seed=1), None).targets]
+        assert paths == ["patient.patient_name", "patient.contacts[*].email"]
+
+    def test_nothing_real_is_left_anywhere_in_the_output(self):
+        original = self.frame()
+        processed, _ = run(original)
+        text = str(processed.to_dicts())
+        for real in ("John Smith", "Jane Doe", "a@b.com", "c@d.com", "e@f.com"):
+            assert real not in text
+
+
+class TestLeakCheckSeesInsideLists:
+    """The leak check stringified list-of-struct elements: it flagged a correctly faked list, and
+    could not find an original inside one except as a vague shape warning."""
+
+    def test_a_correctly_processed_list_is_clean(self):
+        _, _, state = process_sheets({"s": TestNestedListsAreProcessed.frame()}, PIIConfig(seed=1))
+        assert not [w for w in state.warnings if "leak check" in w]
+
+    def test_an_original_left_inside_a_list_is_a_definite_leak(self):
+        from pii_faker.core.leak_check import check_processed_frame
+
+        frame = TestNestedListsAreProcessed.frame()                      # not processed at all
+        report = check_processed_frame(
+            frame, originals={"a@b.com"}, processed_paths={"patient.contacts[*].email"})
+        found = [f for f in report.findings if f.kind == "original_value"]
+        assert [f.path for f in found] == ["patient.contacts[*].email"]
+        assert not report.clean
+
+    def test_a_processed_path_is_not_flagged_by_shape(self):
+        from pii_faker.core.leak_check import check_processed_frame
+
+        processed, _ = run(TestNestedListsAreProcessed.frame())
+        report = check_processed_frame(
+            processed, originals={"a@b.com"}, processed_paths={"patient.contacts[*].email", "patient.patient_name"})
+        assert report.clean
