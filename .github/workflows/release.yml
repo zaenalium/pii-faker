@@ -1,0 +1,57 @@
+name: Release (1.7)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller pywebview platformdirs
+          pip install -e .
+      - name: Build unsigned .app and .dmg
+        run: |
+          pyinstaller --clean --noconfirm packaging/pii-faker-mac.spec
+          mkdir -p dist/dmg && cp -R "dist/PII Faker.app" dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "PII Faker" -srcfolder dist/dmg -ov \
+            -format UDZO dist/PII-Faker-mac-${{ github.ref_name || 'dev' }}.dmg
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-dmg
+          path: dist/PII-Faker-mac-*.dmg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller pywebview platformdirs
+          pip install -e .
+      - name: Build unsigned installer
+        run: pyinstaller --clean --noconfirm packaging/pii-faker-win.spec
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/*.exe
+
+  # Signing (roadmap 1.8) needs:
+  #   - Apple Developer ID + notarization secrets (APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD)
+  #   - Windows signing via Azure Trusted Signing or SignPath.
+  # Add a `sign` job here once those are provisioned; building unsigned
+  # artifacts now unblocks QA and internal installs.

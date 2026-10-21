@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="pii-session-token" content="{{ session_token | default('') }}">
     <title>PII Faker</title>
     <style>
         * {
@@ -398,6 +399,7 @@
         <div class="tabs">
             <button class="tab active" onclick="switchTab('process')">Process Data</button>
             <button class="tab" onclick="switchTab('restore')">Restore Data</button>
+            <button class="tab" onclick="switchTab('roundtrip')">LLM Round-trip</button>
         </div>
 
         <!-- Process Tab -->
@@ -413,6 +415,12 @@
                 </p>
             </div>
             <input type="file" id="file-input" accept=".csv,.tsv,.xlsx,.xls,.json,.ndjson,.jsonl,.parquet" style="display: none">
+            <div id="desktop-open" class="hidden" style="margin-top: 10px;">
+                <button type="button" class="btn" onclick="openNativeFile()">📂 Open file (no upload copy)</button>
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Desktop only: reads the file in place — best for large files.
+                </small>
+            </div>
 
             <div id="file-info" class="hidden" style="margin-top: 15px;">
                 <strong>Selected:</strong> <span id="filename"></span>
@@ -424,6 +432,16 @@
                     No PII columns detected. You can add custom columns below.
                 </div>
                 <div id="detections-list" class="columns-list"></div>
+
+                <div class="form-group" style="margin-top: 20px;">
+                    <label for="preset-select">Preset</label>
+                    <select id="preset-select" onchange="applyPreset(this.value)">
+                        <option value="">— none —</option>
+                    </select>
+                    <small style="color: #666; display: block; margin-top: 5px;">
+                        e.g. <code>id</code> for Indonesia (UU PDP) — pre-fills locale + columns.
+                    </small>
+                </div>
 
                 <div class="form-group" style="margin-top: 20px;">
                     <label for="extra-columns">Extra PII Columns</label>
@@ -438,15 +456,19 @@
                         <div class="form-group">
                             <label>Mode</label>
                             <div class="mode-toggle">
-                                <button class="mode-btn active" onclick="setMode('fake', this)">🎭 Fake</button>
-                                <button class="mode-btn" onclick="setMode('redact', this)">🔒 Redact</button>
+                                <button class="mode-btn" onclick="setMode('fake', this)">🎭 Fake</button>
+                                <button class="mode-btn active" onclick="setMode('redact', this)">🔒 Redact</button>
                             </div>
+                            <small style="color: #666; display: block; margin-top: 5px;">
+                                Redact + <code>typed-token</code> is the LLM-safe default — tokens survive models, realistic fakes get rewritten.
+                            </small>
                         </div>
                     </div>
-                    <div class="col" id="redact-options" style="display: none;">
+                    <div class="col" id="redact-options">
                         <div class="form-group">
                             <label for="redact-style">Redaction Style</label>
                             <select id="redact-style">
+                                <option value="typed-token" selected>Typed token: &lt;PERSON_1&gt; (LLM default)</option>
                                 <option value="full">Full: [REDACTED]</option>
                                 <option value="partial">Partial: XXXX-1234</option>
                                 <option value="token">Token: REDACTED_0001</option>
@@ -473,11 +495,18 @@
                     ✅ Processing complete! Download your files below.
                 </div>
                 <div class="warning-box">
-                    ⚠️ <strong>Important:</strong> The mapping file contains real PII. Keep it secure and never send it to an LLM.
+                    ⚠️ <strong>Mapping file contains real PII.</strong> It maps every
+                    fake value back to the real person — never send it to an LLM,
+                    never email it, and delete it when you no longer need to restore.
+                    <div style="margin-top: 8px; font-size: 0.85rem;">
+                        Save location: <code id="mapping-path"></code>
+                    </div>
                 </div>
                 <div style="margin-top: 20px;">
                     <a id="download-output" class="download-btn">📥 Download Processed File</a>
                     <a id="download-mapping" class="download-btn">📥 Download Mapping</a>
+                    <a id="download-audit" class="download-btn hidden">📄 Download Audit</a>
+                    <button type="button" class="btn" id="delete-mapping-btn" onclick="deleteMapping()">🗑️ Delete Mapping</button>
                 </div>
             </div>
         </div>
@@ -513,8 +542,37 @@
                 <div class="info-box">
                     ✅ Restoration complete!
                 </div>
+                <div id="restore-spans" class="hidden" style="margin-top: 15px; padding: 15px; background: #f8f9ff; border-radius: 8px;">
+                    <strong>Restored preview (highlighted spans):</strong>
+                    <div id="restore-preview" style="margin-top: 8px; line-height: 1.8;"></div>
+                </div>
                 <div style="margin-top: 20px;">
                     <a id="download-restored" class="download-btn">📥 Download Restored File</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Round-trip Tab (4.1: copy for LLM → paste response → highlighted restore) -->
+        <div id="roundtrip-tab" class="card hidden">
+            <h2 style="margin-bottom: 20px;">💬 LLM Round-trip</h2>
+            <p style="color: #666; margin-bottom: 15px;">
+                Paste the LLM's response to your processed data below. Restored spans are highlighted.
+                Tip: process with <code>--redact-style typed-token</code> — models rarely rewrite tokens like <code>&lt;PERSON_1&gt;</code>, but often rewrite realistic fakes ("Mr. Smith").
+            </p>
+            <div class="form-group">
+                <label>Upload the Mapping File used for processing</label>
+                <input type="file" id="rt-mapping" accept=".json,.db,.sqlite,.pii">
+            </div>
+            <div class="form-group">
+                <label>Paste LLM response (with fakes/tokens)</label>
+                <textarea id="rt-input" rows="8" style="width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px;" placeholder="The report for <PERSON_1> ..."></textarea>
+            </div>
+            <button class="btn btn-primary" onclick="roundtripRestore()">✨ Restore pasted text</button>
+            <div id="rt-result" class="result-section">
+                <div class="info-box">✅ Restored — <span id="rt-count"></span> span(s).</div>
+                <div id="rt-preview" style="margin-top: 12px; padding: 15px; background: #f8f9ff; border-radius: 8px; line-height: 1.8;"></div>
+                <div style="margin-top: 12px;">
+                    <button class="btn" onclick="copyRestored()">📋 Copy restored text</button>
                 </div>
             </div>
         </div>
@@ -523,11 +581,94 @@
     <script>
         let currentJobId = null;
         let selectedColumns = new Set();
-        let currentMode = 'fake';
+        let currentMode = 'redact';
+
+        function sessionHeaders() {
+            const tag = document.querySelector('meta[name="pii-session-token"]');
+            const token = tag && tag.content ? tag.content : '';
+            return token ? { 'X-PII-Session': token } : {};
+        }
+
+        async function apiFetch(path, options) {
+            const merged = Object.assign({}, options);
+            merged.headers = Object.assign({}, merged.headers, sessionHeaders());
+            return fetch(path, merged);
+        }
+
+        // Presets (3.4)
+        (async function loadPresets() {
+            try {
+                const r = await apiFetch('/api/presets');
+                if (!r.ok) return;
+                const presets = await r.json();
+                const sel = document.getElementById('preset-select');
+                presets.forEach(p => {
+                    const o = document.createElement('option');
+                    o.value = p.name;
+                    o.textContent = p.name + (p.locale ? ' (' + p.locale + ')' : '') + ' — ' + (p.description || '');
+                    sel.appendChild(o);
+                });
+            } catch (e) {}
+        })();
+        function applyPreset(name) {
+            if (!name) return;
+            fetch('/api/presets').then(r => r.json()).then(presets => {
+                const preset = presets.find(p => p.name === name);
+                if (preset && preset.locale) {
+                    const seed = document.getElementById('seed');
+                    // preset locale is informational; show in extra-columns hint via console
+                    console.log('preset', preset);
+                }
+            });
+        }
 
         // File upload handling
         const uploadZone = document.getElementById('upload-zone');
         const fileInput = document.getElementById('file-input');
+
+        // Desktop bridge: native file dialogs + path-based flow (no upload copy)
+        let desktopPathMode = false;
+        if (window.pywebview && window.pywebview.api) {
+            document.getElementById('desktop-open').classList.remove('hidden');
+        }
+
+        async function openNativeFile() {
+            if (!window.pywebview || !window.pywebview.api) return;
+            try {
+                const path = await window.pywebview.api.open_file();
+                if (!path) return;
+                desktopPathMode = true;
+                document.getElementById('filename').textContent = path + ' (in place)';
+                document.getElementById('file-info').classList.remove('hidden');
+                await detectPIIPath(path);
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function detectPIIPath(path) {
+            try {
+                const response = await apiFetch('/api/detect-path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        path: path,
+                        match_strategy: 'normalized',
+                        extra_columns: '',
+                        override_defaults: false,
+                    }),
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    currentJobId = data.job_id;
+                    displayDetections(data.detections);
+                } else {
+                    alert('Error: ' + (data.detail || 'Failed to detect PII'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
 
         uploadZone.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -558,15 +699,6 @@
 
             // Detect PII columns
             detectPII(file);
-        }
-
-        // A 401 means the session expired or the server restarted: reload to reach sign-in.
-        async function apiFetch(url, options) {
-            const response = await fetch(url, options);
-            if (response.status === 401) {
-                window.location.reload();
-            }
-            return response;
         }
 
         async function detectPII(file) {
@@ -626,8 +758,11 @@
                         const checkboxHtml = '<input type="checkbox" checked ' +
                             'data-path="' + col.path.replace(/"/g, '&quot;') + '" ' +
                             'onchange="toggleColumn(this.dataset.path, this.checked)">';
+                        const signal = col.name_match ? 'name' : ('value:' + (col.value_detector || '?'));
+                        const conf = (col.confidence != null ? col.confidence.toFixed(2) : '1.00');
                         tag.innerHTML = checkboxHtml + ' ' + col.column +
-                            ' <span style="font-size: 0.8rem; opacity: 0.7">(' + col.category + ')</span>';
+                            ' <span style="font-size: 0.8rem; opacity: 0.7">(' + col.category +
+                            ' · ' + conf + ' · ' + signal + ')</span>';
                         tagsDiv.appendChild(tag);
                         selectedColumns.add(col.path);
                     });
@@ -683,7 +818,9 @@
 
                             const categorySpan = document.createElement('span');
                             categorySpan.className = 'category';
-                            categorySpan.textContent = col.category;
+                            const nconf = (col.confidence != null ? col.confidence.toFixed(2) : '1.00');
+                            const nsignal = col.name_match ? 'name' : ('value:' + (col.value_detector || '?'));
+                            categorySpan.textContent = col.category + ' · ' + nconf + ' · ' + nsignal;
 
                             const typeSpan = document.createElement('span');
                             typeSpan.style.fontSize = '0.75rem';
@@ -723,7 +860,6 @@
             currentMode = mode;
             document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            document.getElementById('redact-options').style.display = mode === 'redact' ? 'block' : 'none';
         }
 
         async function processFile() {
@@ -764,21 +900,43 @@
             if (seed) formData.append('seed', parseInt(seed));
 
             try {
-                const response = await apiFetch('/api/process', {
-                    method: 'POST',
-                    body: formData,
-                });
+                let response;
+                if (desktopPathMode) {
+                    const payload = {
+                        job_id: currentJobId,
+                        selected_columns: allColumns.join(','),
+                        mode: currentMode,
+                        redact_style: document.getElementById('redact-style').value,
+                    };
+                    if (seed) payload.seed = parseInt(seed);
+                    response = await apiFetch('/api/process-path', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                } else {
+                    response = await apiFetch('/api/process', {
+                        method: 'POST',
+                        body: formData,
+                    });
+                }
 
                 const data = await response.json();
 
                 document.getElementById('loading').classList.remove('visible');
 
                 if (response.ok) {
-                    document.getElementById('download-output').href = `/api/download/${data.job_id}/output`;
-                    document.getElementById('download-mapping').href = `/api/download/${data.job_id}/mapping`;
-                    document.getElementById('result-section').classList.add('visible');
-                    if (data.skipped && data.skipped.length) {
-                        alert('These selected fields hold no text, so they were left unchanged: ' + data.skipped.join(', '));
+                    if (desktopPathMode && data.output_path) {
+                        document.getElementById('mapping-path').textContent = data.mapping_path || '';
+                        document.getElementById('result-section').classList.add('visible');
+                        alert('Processed in place:\n' + data.output_path + '\nMapping:\n' + data.mapping_path);
+                    } else {
+                        document.getElementById('download-output').href = `/api/download/${data.job_id}/output`;
+                        document.getElementById('download-mapping').href = `/api/download/${data.job_id}/mapping`;
+                        document.getElementById('download-audit').href = `/api/download/${data.job_id}/audit`;
+                        document.getElementById('download-audit').classList.remove('hidden');
+                        document.getElementById('mapping-path').textContent = '(server temp file — deleted after download)';
+                        document.getElementById('result-section').classList.add('visible');
                     }
                 } else {
                     alert('Error: ' + (data.detail || 'Processing failed'));
@@ -830,6 +988,28 @@
             }
         }
 
+        // One-click server-side mapping delete (1.5)
+        async function deleteMapping() {
+            if (!currentJobId) return;
+            if (!confirm('Delete the server-side mapping file? You will no longer be able to restore from it.')) return;
+            try {
+                const response = await apiFetch('/api/delete-mapping', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ job_id: currentJobId }),
+                });
+                const data = await response.json();
+                if (response.ok && data.deleted) {
+                    alert('Mapping deleted from the server.');
+                    document.getElementById('mapping-path').textContent = '(deleted)';
+                } else {
+                    alert('Could not delete mapping (it may already be gone).');
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
         // Tab switching
         function switchTab(tab) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -837,6 +1017,63 @@
 
             document.getElementById('process-tab').classList.toggle('hidden', tab !== 'process');
             document.getElementById('restore-tab').classList.toggle('hidden', tab !== 'restore');
+            document.getElementById('roundtrip-tab').classList.toggle('hidden', tab !== 'roundtrip');
+        }
+
+        function escHtml(s) {
+            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function highlightSpans(text, spans) {
+            // spans are offsets into the RESTORED text
+            let html = '';
+            let cur = 0;
+            const ordered = (spans || []).slice().sort((a, b) => a.start - b.start);
+            for (const s of ordered) {
+                html += escHtml(text.slice(cur, s.start));
+                html += '<mark style="background: #c8e6c9; padding: 1px 3px; border-radius: 3px;">' + escHtml(text.slice(s.start, s.end)) + '</mark>';
+                cur = s.end;
+            }
+            html += escHtml(text.slice(cur));
+            return html;
+        }
+
+        let lastRestoredText = '';
+
+        async function roundtripRestore() {
+            const mappingFile = document.getElementById('rt-mapping').files[0];
+            const pasted = document.getElementById('rt-input').value;
+            if (!mappingFile || !pasted) {
+                alert('Please select a mapping file and paste the LLM response');
+                return;
+            }
+            const formData = new FormData();
+            formData.append('mapping_file', mappingFile);
+            formData.append('text', pasted);
+            try {
+                const response = await apiFetch('/api/restore-text', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    lastRestoredText = data.restored;
+                    document.getElementById('rt-count').textContent = (data.spans || []).length;
+                    document.getElementById('rt-preview').innerHTML = highlightSpans(data.restored, data.spans);
+                    document.getElementById('rt-result').classList.add('visible');
+                } else {
+                    alert('Error: ' + (data.detail || 'Restore failed'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        function copyRestored() {
+            navigator.clipboard.writeText(lastRestoredText).then(
+                () => alert('Copied!'),
+                (e) => alert('Copy failed: ' + e.message)
+            );
         }
     </script>
 </body>

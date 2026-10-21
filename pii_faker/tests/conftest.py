@@ -4,7 +4,7 @@ import pytest
 import polars as pl
 from pathlib import Path
 
-from pii_faker.core.config import PIIConfig, PIIMode, MatchStrategy
+from pii_faker.core.config import PIIConfig, PIIMode, MatchStrategy, RedactionStyle
 
 
 @pytest.fixture
@@ -16,7 +16,7 @@ def config():
 @pytest.fixture
 def redact_config():
     """Redaction configuration for tests."""
-    return PIIConfig(mode=PIIMode.REDACT, seed=42)
+    return PIIConfig(mode=PIIMode.REDACT, redact_style=RedactionStyle.FULL, seed=42)
 
 
 @pytest.fixture

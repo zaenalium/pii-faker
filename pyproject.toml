@@ -44,18 +44,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = [
-    "mcp>=2.2.0",
-]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-benchmark>=4.0.0",
     "httpx>=0.25.0",
+    "hypothesis>=6.0.0",
 ]
+desktop = ["pywebview>=6.0", "platformdirs>=4.0"]
+enc = ["cryptography>=42", "keyring>=25"]
+nlp = ["spacy>=3.7"]
 
 [project.scripts]
 pii-faker = "pii_faker.cli.main:app"
+pii-faker-desktop = "pii_faker.desktop:main"
 
 [project.urls]
 Homepage = "https://github.com/zaenalium/pii-faker"

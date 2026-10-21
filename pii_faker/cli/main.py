@@ -15,10 +15,14 @@ from rich.table import Table
 from rich import print as rprint
 
 from pii_faker.core.config import PIIConfig, PIIMode, RedactionStyle, MatchStrategy
-from pii_faker.core.processor import PIIProcessor
 from pii_faker.core.mapper import PIIMapper
 from pii_faker.core.restorer import PIIRestorer
 from pii_faker.core.file_io import FileHandler
+from pii_faker.core.pipeline import (
+    detect_targets,
+    process_sheets,
+    restore_sheets,
+)
 
 app = typer.Typer(
     name="pii-faker",
@@ -44,19 +48,12 @@ def main(
     """
     PII Faker - Detect, fake, or redact PII in datasets for LLM-safe data sharing.
     """
+    try:
+        from pii_faker.core.config import auto_expire_mappings
+        auto_expire_mappings()
+    except Exception:
+        pass
     pass
-
-
-def _saved_pii_columns() -> List[str]:
-    """Custom columns saved with `pii-faker columns add` in ~/.pii_faker/config.yaml."""
-    import yaml
-
-    config_file = Path.home() / ".pii_faker" / "config.yaml"
-    if not config_file.exists():
-        return []
-    with open(config_file, 'r') as f:
-        data = yaml.safe_load(f) or {}
-    return [str(c) for c in data.get('extra_pii_columns', [])]
 
 
 @app.command()
@@ -64,9 +61,9 @@ def process(
     input_file: str = typer.Argument(..., help="Input file path (CSV, Excel, JSON, NDJSON, Parquet)"),
     output: str = typer.Option(..., "--output", "-o", help="Output file path"),
     mapping_out: Optional[str] = typer.Option(None, "--mapping-out", "-m", help="Mapping file path"),
-    mode: PIIMode = typer.Option(PIIMode.FAKE, "--mode", help="Processing mode: fake or redact"),
+    mode: PIIMode = typer.Option(PIIMode.FAKE, "--mode", help="Processing mode: fake or redact (redact is LLM-safe)"),
     redact_style: RedactionStyle = typer.Option(
-        RedactionStyle.FULL, "--redact-style", help="Redaction style: full, partial, or token"
+        RedactionStyle.TYPED_TOKEN, "--redact-style", help="Redaction style: typed-token (LLM default), full, partial, or token"
     ),
     match_strategy: MatchStrategy = typer.Option(
         MatchStrategy.NORMALIZED, "--match-strategy", help="Column matching: exact, normalized, or fuzzy"
@@ -84,20 +81,50 @@ def process(
     strict_paths: bool = typer.Option(
         False, "--strict-paths", help="Only match top-level fields in nested structures"
     ),
+    locale: Optional[str] = typer.Option(
+        None, "--locale", help="Faker locale for fake data (e.g., id_ID, en_US)"
+    ),
+    preset: Optional[str] = typer.Option(
+        None, "--preset", help="Compliance preset (e.g., id for Indonesia/UU PDP)"
+    ),
+    encrypt: bool = typer.Option(
+        False, "--encrypt", help="Encrypt the mapping file (AES-GCM, keychain/passphrase)"
+    ),
+    passphrase: Optional[str] = typer.Option(
+        None, "--passphrase", help="Passphrase for mapping encryption (or set PII_FAKER_PASSPHRASE)"
+    ),
+    audit_out: Optional[str] = typer.Option(
+        None, "--audit-out", help="Write a PII-free audit report (JSON) to this path"
+    ),
     sheets: Optional[str] = typer.Option(None, "--sheets", help="Excel sheets to process"),
     all_sheets: bool = typer.Option(False, "--all-sheets", help="Process all Excel sheets"),
     infer_schema_length: Optional[int] = typer.Option(
         100, "--infer-schema-length", help="Rows for JSON schema inference (0 for full scan)"
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be processed without doing it"),
+    shift_days: Optional[int] = typer.Option(
+        None, "--shift-days", help="Date-shift mode: fixed day offset (implies --mode shift)"
+    ),
+    perturb_pct: Optional[float] = typer.Option(
+        None, "--perturb-pct", help="Perturb mode: ±percent numeric noise (implies --mode perturb)"
+    ),
+    project_mapping: Optional[str] = typer.Option(
+        None, "--project-mapping", help="Project mode (4.5): reuse/add to this shared mapping file"
+    ),
+    ner: bool = typer.Option(False, "--ner", help="Enable free-text NER for names/addresses (requires pii-faker[nlp])"),
 ):
     """Process a file to fake or redact PII."""
 
+    # Mode implications (4.4)
+    if shift_days is not None and mode == PIIMode.FAKE:
+        mode = PIIMode.SHIFT
+    if perturb_pct is not None and mode == PIIMode.FAKE:
+        mode = PIIMode.PERTURB
+
     # Parse extra columns
-    # Columns saved with `pii-faker columns add` always apply, alongside --extra-pii-columns.
-    extra_cols = _saved_pii_columns()
+    extra_cols = []
     if extra_pii_columns:
-        extra_cols += [c.strip() for c in extra_pii_columns.split(',') if c.strip() not in extra_cols]
+        extra_cols = [c.strip() for c in extra_pii_columns.split(',')]
 
     json_cols = []
     if json_columns:
@@ -113,10 +140,18 @@ def process(
         override_defaults=override_defaults,
         json_columns=json_cols,
         strict_paths=strict_paths,
-        infer_schema_length=infer_schema_length,
+        locale=locale,
+        infer_schema_length=infer_schema_length if infer_schema_length != 0 else None,
         sheets=sheets,
         all_sheets=all_sheets,
+        shift_days=shift_days,
+        perturb_pct=perturb_pct,
+        ner=ner,
     )
+    if preset:
+        from pii_faker.core.presets import apply_preset
+
+        config = apply_preset(config, preset)
 
     try:
         # Read input
@@ -125,24 +160,37 @@ def process(
 
         data = file_handler.read(input_file, sheets=sheets, all_sheets=all_sheets)
 
-        # Handle multiple sheets
+        # Handle multiple sheets (single pipeline: shared RunState + scoped mapper)
         if isinstance(data, dict):
             sheets_to_process = data
         else:
             sheets_to_process = {"default": data}
 
-        # Detect PII in flat, nested and JSON-string columns
-        processor = PIIProcessor(config)
+        # Detect PII targets via the pipeline plan (flat + nested + JSON-string)
         all_pii_columns = {}
+        all_plans = {}
 
         for sheet_name, df in sheets_to_process.items():
-            pii_cols = processor.detect(df)
-            if pii_cols:
-                all_pii_columns[sheet_name] = pii_cols
+            plan = detect_targets(df, config)
+            all_plans[sheet_name] = plan
+            if plan.targets:
+                all_pii_columns[sheet_name] = [
+                    {
+                        'column': t.column,
+                        'path': t.path,
+                        'category': t.category,
+                        'pattern': t.pattern,
+                        'kind': t.kind,
+                        'confidence': t.confidence,
+                        'name_match': t.name_match,
+                        'value_detector': t.value_detector,
+                    }
+                    for t in plan.targets
+                ]
 
         # Dry run - just report findings
         if dry_run:
-            _print_dry_run(processor, all_pii_columns, sheets_to_process)
+            _print_dry_run(all_pii_columns, sheets_to_process, config)
             raise typer.Exit()
 
         if not all_pii_columns:
@@ -150,34 +198,20 @@ def process(
             if not typer.confirm("Continue without processing?"):
                 raise typer.Abort()
 
-        # Process each sheet
-        processed_sheets = {}
-
+        # Process all sheets through the single pipeline
         for sheet_name, df in sheets_to_process.items():
-            pii_cols = all_pii_columns.get(sheet_name, [])
-            if not pii_cols:
-                processed_sheets[sheet_name] = df
-                continue
-
-            console.print(f"[bold]Processing[/bold] sheet '{sheet_name}'...")
-            processed_sheets[sheet_name] = processor.process(df, pii_cols)
-
-        if processor.skipped:
-            console.print(
-                "[yellow]Warning:[/yellow] matched as PII but left unchanged (no text values "
-                f"at that name or path): {', '.join(processor.skipped)}"
-            )
-
-        # Save the mapping before writing any output, so a failure here (bad
-        # path, ambiguous mapping) never leaves processed data we can't restore.
-        if mapping_out:
-            processor.mapper.save(mapping_out)
-            console.print(f"[bold]Mapping saved[/bold] to {mapping_out}")
-        elif all_pii_columns and processor.mapper.is_lossless_mode():
-            console.print(
-                "[yellow]Warning:[/yellow] no --mapping-out given, so the original values "
-                "cannot be restored later."
-            )
+            plan = all_plans[sheet_name]
+            if plan.targets:
+                kinds = sorted({t.kind for t in plan.targets})
+                console.print(
+                    f"[bold]Processing[/bold] sheet '{sheet_name}' "
+                    f"({len(plan.targets)} targets: {', '.join(kinds)})..."
+                )
+        processed_sheets, mapper, run_state = process_sheets(
+            sheets_to_process, config
+        )
+        for warning in dict.fromkeys(run_state.warnings):
+            console.print(f"[yellow]Warning:[/yellow] {warning}")
 
         # Write output
         console.print(f"[bold]Writing[/bold] {output}...")
@@ -194,6 +228,53 @@ def process(
                 )
                 file_handler.write(df, sheet_output)
 
+        # Save mapping
+        if mapping_out:
+            if encrypt:
+                mapper.save(mapping_out, encrypt=True, passphrase=passphrase)
+            else:
+                mapper.save(mapping_out)
+            console.print(f"[bold]Mapping saved[/bold] to {mapping_out}")
+            try:
+                audit_json = mapping_out.replace(".json", "_audit.json").replace(".db", "_audit.json")
+                if Path(audit_json).exists():
+                    console.print(f"[dim]Audit: {audit_json}[/dim]")
+            except Exception:
+                pass
+        if audit_out:
+            from pii_faker.core.audit import build_audit
+            import datetime as _dt
+
+            # Reuse the audit already built on run_state if present; else build one from the sheets.
+            audit = getattr(run_state, "audit", None)
+            if audit is None:
+                all_targets: list = []
+                counts: dict = {}
+                for sheet_name, frame in sheets_to_process.items():
+                    from pii_faker.core.pipeline import plan_dataframe
+
+                    plan = plan_dataframe(frame, config)
+                    all_targets.extend(plan.targets)
+                    for t in plan.targets:
+                        try:
+                            counts[t.path] = int(frame[t.column].n_unique())
+                        except Exception:
+                            counts[t.path] = 0
+                audit = build_audit(
+                    run_id=mapper.session_id,
+                    started_at=_dt.datetime.now(),
+                    finished_at=_dt.datetime.now(),
+                    config=config,
+                    targets=all_targets,
+                    counts=counts,
+                    warnings=list(dict.fromkeys(run_state.warnings)),
+                    leak_report={"clean": True},
+                )
+            import json as _json
+
+            Path(audit_out).write_text(_json.dumps(audit.to_dict() if hasattr(audit, "to_dict") else audit, indent=2, ensure_ascii=False))
+            console.print(f"[dim]Audit: {audit_out}[/dim]")
+
         console.print("[bold green]Done![/bold green]")
 
     except (typer.Exit, typer.Abort):
@@ -204,35 +285,72 @@ def process(
 
 
 def _print_dry_run(
-    processor: PIIProcessor,
     all_pii_columns: dict,
     sheets: dict,
+    config=None,
 ):
     """Print dry run report."""
     table = Table(title="PII Detection Report (Dry Run)")
     table.add_column("Sheet", style="cyan")
-    table.add_column("Column", style="green")
+    table.add_column("Target", style="green")
     table.add_column("Category", style="yellow")
     table.add_column("Pattern Match", style="blue")
+    table.add_column("Kind", style="magenta")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Signal", style="dim")
     table.add_column("Unique Values", justify="right")
 
-    total_unique = 0
     for sheet_name, pii_cols in all_pii_columns.items():
         df = sheets[sheet_name]
         for col_info in pii_cols:
-            unique_count = processor.unique_count(df, col_info)
-            total_unique += unique_count
+            col_name = col_info['column']
+            try:
+                unique_count = df[col_name].n_unique()
+            except Exception:
+                unique_count = 0
+            if col_info.get('name_match', True):
+                signal = "name"
+            else:
+                signal = f"value:{col_info.get('value_detector', '?')}"
             table.add_row(
                 sheet_name,
-                col_info['column'],
+                col_info.get('path', col_name),
                 col_info['category'],
                 col_info['pattern'],
+                col_info.get('kind', 'flat'),
+                f"{col_info.get('confidence', 1.0):.2f}",
+                signal,
                 str(unique_count),
             )
 
     console.print(table)
 
+    total_unique = 0
+    for sheet_name, pii_cols in all_pii_columns.items():
+        df = sheets[sheet_name]
+        for col_info in pii_cols:
+            try:
+                total_unique += df[col_info['column']].n_unique()
+            except Exception:
+                pass
+
     console.print(f"\n[bold]Total unique PII values to process:[/bold] {total_unique}")
+
+    # Locale auto-suggestion (2.5)
+    from pii_faker.core.value_detectors import scan_frame_values, suggest_locale
+
+    all_columns: list = []
+    value_findings: dict = {}
+    for sheet_name, df in sheets.items():
+        all_columns.extend(df.columns)
+        for col, matches in scan_frame_values(df).items():
+            value_findings[f"{sheet_name}.{col}"] = matches
+    suggestion = suggest_locale(value_findings, all_columns)
+    if suggestion and suggestion != (config.locale or "en_US"):
+        console.print(
+            f"[yellow]Suggestion:[/yellow] Indonesian identifiers detected — "
+            f"consider [bold]--locale {suggestion}[/bold] for localised fakes."
+        )
 
 
 @app.command()
@@ -241,11 +359,12 @@ def restore(
     mapping: str = typer.Option(..., "--mapping", "-m", help="Mapping file path"),
     output: str = typer.Option(..., "--output", "-o", help="Output file path"),
     is_text: bool = typer.Option(False, "--text", "-t", help="Input is free-form text"),
+    passphrase: Optional[str] = typer.Option(None, "--passphrase", help="Passphrase for encrypted mapping"),
 ):
     """Restore original values from faked/redacted data."""
     try:
         console.print(f"[bold]Loading mapping[/bold] from {mapping}...")
-        mapper = PIIMapper.load(mapping)
+        mapper = PIIMapper.load(mapping, passphrase=passphrase)
 
         restorer = PIIRestorer(mapper)
 
@@ -262,7 +381,7 @@ def restore(
             with open(output, 'w') as f:
                 f.write(restored_text)
         else:
-            # Handle tabular/JSON data
+            # Handle tabular/JSON data (scope-aware restore)
             file_handler = FileHandler(mapper.config)
             console.print(f"[bold]Reading[/bold] {input_file}...")
 
@@ -271,11 +390,11 @@ def restore(
             if isinstance(df, dict):
                 # Multiple sheets
                 output_path = Path(output)
-                for sheet_name, sheet_df in df.items():
+                restored = restore_sheets(df, mapper)
+                for sheet_name, restored_df in restored.items():
                     sheet_output = str(
                         output_path.with_name(f"{output_path.stem}_{sheet_name}{output_path.suffix}")
                     )
-                    restored_df = restorer.restore_dataframe(sheet_df)
                     file_handler.write(restored_df, sheet_output)
             else:
                 console.print("[bold]Restoring[/bold] values...")
@@ -303,11 +422,13 @@ def columns_command(
     """Manage custom PII columns."""
     import yaml
 
-    # Default config path
+    from pii_faker.core.config import user_config_path
+
+    # Default config path (platformdirs, with legacy ~/.pii_faker fallback)
     if config_path is None:
-        config_dir = Path.home() / ".pii_faker"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = str(config_dir / "config.yaml")
+        resolved = user_config_path()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        config_path = str(resolved)
 
     # Load existing config
     config_data = {}
@@ -359,18 +480,132 @@ def columns_command(
         raise typer.Exit(code=1)
 
 
+@app.command("presets")
+def presets_command(
+    action: str = typer.Argument(..., help="Action: list or show"),
+    name: Optional[str] = typer.Argument(None, help="Preset name (for show)"),
+):
+    """List or show compliance presets."""
+    from pii_faker.core.presets import list_presets, load_preset
+
+    if action == "list":
+        presets = list_presets()
+        if not presets:
+            console.print("  (none)")
+            return
+        table = Table(title="Presets")
+        table.add_column("Name", style="cyan")
+        table.add_column("Locale", style="green")
+        table.add_column("Description")
+        for p in presets:
+            table.add_row(p["name"], p.get("locale", ""), p.get("description", ""))
+        console.print(table)
+    elif action == "show":
+        if not name:
+            console.print("[red]Error:[/red] Preset name required.")
+            raise typer.Exit(code=1)
+        data = load_preset(name)
+        rprint(data)
+    else:
+        console.print(f"[red]Error:[/red] Unknown action {action!r}. Use: list, show")
+        raise typer.Exit(code=1)
+
+
+key_app = typer.Typer(help="Manage the encryption master key in the OS keychain.", no_args_is_help=True)
+app.add_typer(key_app, name="key")
+
+
+@key_app.command("set")
+def key_set():
+    """Generate and store a new 32-byte master key in the OS keychain."""
+    from pii_faker.core.crypto import keyring_set
+
+    keyring_set()
+    console.print("[green]Master key stored in keychain (service pii-faker, account master).[/green]")
+
+
+@key_app.command("show")
+def key_show():
+    """Show whether a master key exists (never prints the raw key)."""
+    from pii_faker.core.crypto import keyring_exists
+
+    if keyring_exists():
+        console.print("[green]Master key exists[/green] in keychain (pii-faker/master).")
+    else:
+        console.print("[yellow]No master key[/yellow] — run: pii-faker key set")
+
+
+@key_app.command("delete")
+def key_delete():
+    """Delete the master key from the OS keychain."""
+    from pii_faker.core.crypto import keyring_delete
+
+    if keyring_delete():
+        console.print("[green]Master key deleted.[/green]")
+    else:
+        console.print("[yellow]No key to delete, or delete failed.[/yellow]")
+
+
+@app.command("project")
+def project_command(
+    action: str = typer.Argument(..., help="Action: init, add, status"),
+    name: Optional[str] = typer.Argument(None, help="Project name"),
+    mapping: Optional[str] = typer.Option(None, "--mapping", "-m", help="Shared project mapping file"),
+):
+    """Project mode (4.5): one shared mapping across multiple files.
+
+    init: create an empty project mapping. add: merge a per-file mapping
+    into the project mapping (same original → same fake is already enforced
+    by cross-scope reuse, so add is a union).
+    """
+    from pii_faker.core.mapper import PIIMapper
+
+    if action == "init":
+        if not name or not mapping:
+            console.print("[red]Error:[/red] project init needs a NAME and --mapping path.")
+            raise typer.Exit(code=1)
+        m = PIIMapper(PIIConfig())
+        m.save(mapping)
+        console.print(f"[green]Project {name!r} initialised:[/green] {mapping}")
+    elif action == "add":
+        if not mapping:
+            console.print("[red]Error:[/red] project add needs --mapping (project file) plus a FILE mapping.")
+            raise typer.Exit(code=1)
+        if not name:
+            console.print("[red]Error:[/red] project add needs the per-file mapping path as NAME.")
+            raise typer.Exit(code=1)
+        project = PIIMapper.load(mapping) if Path(mapping).exists() else PIIMapper(PIIConfig())
+        incoming = PIIMapper.load(name)
+        project.merge(incoming)
+        project.save(mapping)
+        console.print(f"[green]Merged[/green] {name} into {mapping}")
+    elif action == "status":
+        if not mapping:
+            console.print("[red]Error:[/red] project status needs --mapping.")
+            raise typer.Exit(code=1)
+        project = PIIMapper.load(mapping)
+        entries = len(project.store._entries)
+        scopes = project.store.scopes()
+        console.print(f"[bold]Entries:[/bold] {entries}  [bold]Scopes:[/bold] {', '.join(scopes) or '(none)'}")
+    else:
+        console.print(f"[red]Error:[/red] Unknown action {action!r}. Use: init, add, status")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def cleanup(
     older_than: str = typer.Option("7d", "--older-than", help="Delete mappings older than (e.g., 7d, 24h)"),
     directory: Optional[str] = typer.Option(
-        None, "--directory", "-d", help="Mappings directory (default: ~/.pii_faker/mappings)"
+        None, "--directory", "-d", help="Mappings directory (default: app data dir)"
     ),
 ):
-    """Delete old mapping files (mapping*.json, mapping*.db, mapping*.sqlite)."""
+    """Clean up old mapping files."""
     from datetime import timedelta
 
+    from pii_faker.core.config import mappings_dir
+
     if directory is None:
-        directory = str(Path.home() / ".pii_faker" / "mappings")
+        directory = str(mappings_dir())
 
     # Parse time delta (supports days and hours, incl. fractional)
     try:
@@ -386,184 +621,40 @@ def cleanup(
 
     config = PIIConfig()
     mapper = PIIMapper(config)
-    deleted = mapper.cleanup_old_mappings(directory, older_than_days)
+    mapper.cleanup_old_mappings(directory, older_than_days)
 
-    console.print(f"[green]Deleted {len(deleted)} mapping file(s) older than {older_than}[/green]")
+    console.print(f"[green]Cleaned up mappings older than {older_than}[/green]")
+
+
+@app.command()
+def proxy(
+    upstream: str = typer.Option(..., "--upstream", help="Upstream OpenAI-compatible base URL"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind host (loopback only)"),
+    port: int = typer.Option(11434, "--port", "-p", help="Port to listen on"),
+):
+    """Local LLM proxy (Phase 5, exploratory): OpenAI-compatible scrub + restore on 127.0.0.1 only."""
+    if host != "127.0.0.1":
+        console.print("[yellow]Warning:[/yellow] proxy binds to loopback only; forcing 127.0.0.1")
+        host = "127.0.0.1"
+    import uvicorn
+    from pii_faker.proxy import create_proxy_app
+
+    proxy_app = create_proxy_app(upstream)
+    console.print(f"[bold]Proxy[/bold] {host}:{port} → {upstream}  (scrub/restore, session via X-PII-Session)")
+    uvicorn.run(proxy_app, host=host, port=port)
 
 
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Host to bind to"),
     port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
-    token: Optional[str] = typer.Option(
-        None, "--token", envvar="PII_FAKER_TOKEN",
-        help="Access token, at least 16 characters (prefer the PII_FAKER_TOKEN environment "
-             "variable: command lines are visible to other users). A random one is generated if omitted.",
-    ),
-    retention_minutes: float = typer.Option(
-        60.0, "--retention-minutes", min=1.0,
-        help="Delete a job's uploaded file, outputs and mapping after this many minutes without activity",
-    ),
 ):
-    """Start the web UI (sign-in with an access token required)."""
-    from pii_faker.web.app import run_server
+    """Start the web UI server."""
+    import uvicorn
+    from pii_faker.web.app import app as web_app
 
-    try:
-        # soft_wrap: never break the sign-in link across lines
-        run_server(
-            host, port, token, retention_minutes,
-            announce=lambda message: console.print(message, soft_wrap=True, markup=False, highlight=False),
-        )
-    except ValueError as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        raise typer.Exit(code=1)
-
-
-def _print_mcp_report(err: Console, reports: list) -> None:
-    """What each dataset exposes to the model. Column names only, never values."""
-    for report in reports:
-        table = Table(title=f"Dataset '{report.name}' ({report.rows} rows): what the model can see")
-        table.add_column("Column / field", style="green")
-        table.add_column("Exposed as", style="yellow")
-        for key in report.faked:
-            if key not in report.blocked:
-                table.add_row(key, "faked")
-        for key in report.kept:
-            table.add_row(key, "[red]original values[/red] (kept)")
-        for key in report.pruned:
-            table.add_row(key, "dropped (inside an exposed column)")
-        for key in report.dropped:
-            note = "dropped: looks like PII but holds no text" if key in report.blocked else "dropped"
-            table.add_row(key, note)
-        err.print(table)
-
-
-@app.command("mcp")
-def mcp_command(
-    dataset: List[str] = typer.Option(
-        ..., "--dataset", "-d", help="name=path/to/file. Repeat for several. The model only ever sees the name."
-    ),
-    keep: Optional[str] = typer.Option(
-        None, "--keep",
-        help="Comma-separated columns or nested paths to expose with their ORIGINAL values. "
-             "Everything not faked and not listed here is dropped.",
-    ),
-    keep_unmatched: bool = typer.Option(
-        False, "--keep-unmatched",
-        help="Expose every column the detector did not recognise, as-is. NOT recommended for an "
-             "untrusted provider: the detector only reads column names.",
-    ),
-    mode: PIIMode = typer.Option(PIIMode.FAKE, "--mode", help="fake (default) or redact"),
-    redact_style: RedactionStyle = typer.Option(
-        RedactionStyle.FULL, "--redact-style", help="full or token (partial is refused: it leaks characters)"
-    ),
-    match_strategy: MatchStrategy = typer.Option(MatchStrategy.NORMALIZED, "--match-strategy"),
-    seed: Optional[int] = typer.Option(None, "--seed", "-s", help="Random seed for reproducible fakes"),
-    extra_pii_columns: Optional[str] = typer.Option(
-        None, "--extra-pii-columns", "-e", help="Comma-separated extra PII columns/paths to fake"
-    ),
-    override_defaults: bool = typer.Option(False, "--override-defaults", help="Ignore the built-in column names"),
-    json_columns: Optional[str] = typer.Option(None, "--json-columns", "-j", help="Columns holding JSON text"),
-    strict_paths: bool = typer.Option(False, "--strict-paths", help="Bare names match top-level fields only"),
-    infer_schema_length: Optional[int] = typer.Option(100, "--infer-schema-length", help="0 reads every row"),
-    mapping_out: Optional[str] = typer.Option(
-        None, "--mapping-out", "-m",
-        help="Save the real<->fake mapping here (private file, never exposed to the model) so you can restore later",
-    ),
-    restore_dir: Optional[str] = typer.Option(
-        None, "--restore-dir",
-        help="Enable a tool that restores real values into text and saves it in this folder. "
-             "The model only gets a count back. Never expose this folder to the model.",
-    ),
-    max_rows: int = typer.Option(100, "--max-rows", min=1, help="Most rows any tool call returns"),
-    transport: str = typer.Option("stdio", "--transport", help="stdio (local) or http (remote / tunnel)"),
-    host: str = typer.Option("127.0.0.1", "--host", help="http only: address to bind"),
-    port: int = typer.Option(8765, "--port", "-p", help="http only: port"),
-    token: Optional[str] = typer.Option(
-        None, "--token", envvar="PII_FAKER_MCP_TOKEN",
-        help="http only: access token, at least 16 characters (prefer the PII_FAKER_MCP_TOKEN environment "
-             "variable). Generated and printed if omitted.",
-    ),
-    allowed_host: List[str] = typer.Option(
-        [], "--allowed-host",
-        help="http only: a hostname the server may be reached by, such as your tunnel's. Repeatable.",
-    ),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what the model would see, then exit"),
-):
-    """Serve datasets to an LLM over MCP with all PII faked (safe for untrusted providers)."""
-    import importlib.util
-
-    err = Console(stderr=True)      # stdout carries the protocol in stdio mode
-
-    if importlib.util.find_spec("mcp") is None:
-        err.print("[bold red]Error:[/bold red] the MCP SDK is not installed. Run: pip install 'pii-faker[mcp]'")
-        raise typer.Exit(code=1)
-    if transport not in ("stdio", "http"):
-        err.print("[bold red]Error:[/bold red] --transport must be stdio or http.")
-        raise typer.Exit(code=1)
-
-    from pii_faker.mcp_server import Gateway, parse_dataset_specs, run_gateway
-
-    try:
-        sources = parse_dataset_specs(dataset)
-
-        extra_cols = _saved_pii_columns()
-        if extra_pii_columns:
-            extra_cols += [c.strip() for c in extra_pii_columns.split(',') if c.strip() not in extra_cols]
-
-        config = PIIConfig(
-            mode=mode,
-            redact_style=redact_style,
-            match_strategy=match_strategy,
-            seed=seed,
-            extra_pii_columns=extra_cols,
-            override_defaults=override_defaults,
-            json_columns=[c.strip() for c in json_columns.split(',')] if json_columns else [],
-            strict_paths=strict_paths,
-            infer_schema_length=infer_schema_length,
-        )
-        gateway = Gateway(
-            config,
-            keep=keep.split(',') if keep else [],
-            keep_unmatched=keep_unmatched,
-            max_rows=max_rows,
-            restore_dir=Path(restore_dir) if restore_dir else None,
-        )
-        for name, path in sources.items():
-            err.print(f"[bold]Loading[/bold] {name} from {path}...")
-            gateway.add_dataset(name, path)
-
-        _print_mcp_report(err, gateway.reports())
-        if gateway.processor.skipped:
-            err.print(
-                "[yellow]Warning:[/yellow] matched as PII but holds no text, so it is NOT shown to the model: "
-                + ", ".join(gateway.processor.skipped)
-            )
-        if keep_unmatched:
-            err.print("[yellow]Warning:[/yellow] --keep-unmatched exposes every unrecognised column as-is.")
-
-        if dry_run:
-            err.print("Dry run: nothing is being served.")
-            raise typer.Exit()
-
-        if mapping_out:
-            gateway.save_mapping(mapping_out)
-            err.print(f"[bold]Mapping saved[/bold] to {mapping_out} (not visible to the model)")
-        elif not gateway.can_restore and gateway.processor.mapper.is_lossless_mode():
-            err.print("[yellow]Warning:[/yellow] no --mapping-out or --restore-dir: the real values can't be "
-                      "recovered once this server stops.")
-
-        err.print(f"[bold green]Serving[/bold green] {len(sources)} dataset(s) over {transport}. "
-                  "Stop with Ctrl+C.")
-        run_gateway(
-            gateway, transport, host, port, token, allowed_host,
-            announce=lambda message: err.print(message, soft_wrap=True, markup=False, highlight=False),
-        )
-    except (typer.Exit, typer.Abort):
-        raise
-    except ValueError as e:
-        err.print(f"[bold red]Error:[/bold red] {e}")
-        raise typer.Exit(code=1)
+    console.print(f"[bold]Starting[/bold] PII Faker web UI on {host}:{port}...")
+    uvicorn.run(web_app, host=host, port=port)
 
 
 if __name__ == "__main__":
