@@ -5,16 +5,20 @@ FastAPI-based web interface for PII processing.
 Provides file upload, detection preview, processing, and restore functionality.
 """
 
+import asyncio
+import os
+import time
 import uuid
 import tempfile
 import shutil
 import json as json_module
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 import polars as pl
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi import Depends, FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
@@ -24,13 +28,79 @@ from pii_faker.core.mapper import PIIMapper
 from pii_faker.core.restorer import PIIRestorer
 from pii_faker.core.file_io import FileHandler
 from pii_faker.core.pipeline import detect_targets, process_sheets, restore_sheets
+from pii_faker.web.auth import TOKEN_ENV, SESSION_COOKIE, Authenticator, session_cookie_options
 
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+DEFAULT_RETENTION_MINUTES = 60
+
+
+class JobStore(dict):
+    """The job dict, remembering when each job was last used so idle jobs can expire.
+
+    Any lookup counts as activity, so the endpoints need no changes.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.touched: Dict[str, float] = {}
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.touched[key] = time.time()
+        return value
+
+    def get(self, key, default=None):
+        return self[key] if key in self else default
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.touched[key] = time.time()
+
+    def pop(self, key, *default):
+        self.touched.pop(key, None)
+        return super().pop(key, *default)
+
+
+def purge_expired_jobs(max_age_seconds: float, now: Optional[float] = None) -> int:
+    """Delete jobs (and their temp files) idle for longer than `max_age_seconds`."""
+    now = time.time() if now is None else now
+    expired = [job_id for job_id, touched in list(jobs.touched.items()) if now - touched > max_age_seconds]
+    for job_id in expired:
+        _cleanup_job(job_id)
+    return len(expired)
+
+
+def purge_all_jobs() -> None:
+    """Delete every job's temp files (server shutdown)."""
+    for job_id in list(jobs):
+        _cleanup_job(job_id)
+
+
+async def _reap_expired_jobs(application: FastAPI) -> None:
+    while True:
+        retention = application.state.retention_seconds
+        if not retention:                       # the desktop app keeps jobs until it closes
+            await asyncio.sleep(3600)
+            continue
+        await asyncio.sleep(max(1.0, min(60.0, retention / 2)))
+        purge_expired_jobs(retention)
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    reaper = asyncio.create_task(_reap_expired_jobs(application))
+    try:
+        yield
+    finally:
+        reaper.cancel()
+        purge_all_jobs()
+
 
 app = FastAPI(
     title="PII Faker",
     description="PII Fake/Redact Toolkit - Web Interface",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # Setup static files and templates with absolute paths
@@ -45,14 +115,73 @@ TEMPLATES_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-# In-memory job storage (for demo; production should use Redis/DB)
-jobs: Dict[str, Dict[str, Any]] = {}
+# In-memory job storage (single process; production should use Redis/DB)
+jobs = JobStore()
+
+# Never open by default: a token is generated unless run_server() is given one.
+app.state.auth = Authenticator()
+app.state.retention_seconds = DEFAULT_RETENTION_MINUTES * 60
+# Reading and writing arbitrary local paths is for the single-user desktop app only.
+app.state.allow_local_paths = False
+
+# Everything else needs authentication, including routes added later.
+PUBLIC_PATHS = {"/", "/login"}
+
+RESPONSE_HEADERS = {
+    "Cache-Control": "no-store",          # responses can contain PII
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+@app.middleware("http")
+async def require_authentication(request: Request, call_next):
+    authenticated = request.app.state.auth.is_authenticated(request)
+    if request.url.path in PUBLIC_PATHS or authenticated:
+        response = await call_next(request)
+    else:
+        response = JSONResponse(
+            {"detail": "Not authenticated"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    for name, value in RESPONSE_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
+
+
+def _require_local_paths() -> None:
+    if not app.state.allow_local_paths:
+        raise HTTPException(
+            status_code=403,
+            detail="Path-based processing reads and writes local files and is only available in the desktop app.",
+        )
+
+
+def _login_page(error: Optional[str] = None) -> HTMLResponse:
+    html = templates.get_template("login.html").render(error=error)
+    return HTMLResponse(content=html, status_code=401)
+
+
+def _sign_in(request: Request) -> RedirectResponse:
+    auth = request.app.state.auth
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(value=auth.open_session(), **session_cookie_options(request, auth.session_seconds))
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    """Home page with file upload form."""
-    import os
+async def home(request: Request, token: Optional[str] = None):
+    """Home page with file upload form (or the sign-in page)."""
+    auth = request.app.state.auth
+
+    if token is not None:
+        # Opened from the link printed at startup. Trade the token for a session
+        # cookie and redirect, so it doesn't linger in the address bar.
+        return _sign_in(request) if auth.check_token(token) else _login_page("That token is not valid.")
+
+    if not auth.is_authenticated(request):
+        return _login_page()
 
     try:
         from pii_faker.core.config import auto_expire_mappings
@@ -61,9 +190,35 @@ async def home(request: Request):
         pass
     template = templates.get_template("index.html")
     session_token = os.environ.get("PII_FAKER_SESSION_TOKEN", "")
-    token = getattr(app.state, "session_token", "") or session_token
-    html_content = template.render(request=request, session_token=token)
+    session_token = getattr(app.state, "session_token", "") or session_token
+    html_content = template.render(request=request, session_token=session_token)
     return HTMLResponse(content=html_content)
+
+
+@app.post("/login")
+async def login(request: Request, token: str = Form("")):
+    """Sign in with the access token."""
+    if request.app.state.auth.check_token(token):
+        return _sign_in(request)
+    return _login_page("That token is not valid.")
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    """End this browser session."""
+    request.app.state.auth.close_session(request.cookies.get(SESSION_COOKIE))
+    response = JSONResponse({"status": "signed out"})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str):
+    """Delete a job's uploaded file, outputs and mapping right away."""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    _cleanup_job(job_id)
+    return JSONResponse({"status": "deleted"})
 
 
 @app.post("/api/detect")
@@ -87,9 +242,11 @@ async def detect_pii(
         )
     except HTTPException:
         _cleanup_job(job_id)
+        shutil.rmtree(temp_dir, ignore_errors=True)   # the job isn't registered yet on failure
         raise
     except Exception as e:
         _cleanup_job(job_id)
+        shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -265,7 +422,7 @@ def _resolve_local_path(raw: str) -> Path:
     return candidate
 
 
-@app.post("/api/detect-path")
+@app.post("/api/detect-path", dependencies=[Depends(_require_local_paths)])
 async def detect_path(body: DetectPathBody):
     """Detect PII in a local file by path (desktop only, no upload copy)."""
     job_id = str(uuid.uuid4())
@@ -373,7 +530,7 @@ async def process_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/process-path")
+@app.post("/api/process-path", dependencies=[Depends(_require_local_paths)])
 async def process_path(body: ProcessPathBody):
     """Process a local file by path (desktop only, no upload copy)."""
     if body.job_id not in jobs:
@@ -599,6 +756,47 @@ async def restore_text_api(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-if __name__ == "__main__":
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    token: Optional[str] = None,
+    retention_minutes: float = DEFAULT_RETENTION_MINUTES,
+    announce: Callable[[str], None] = print,
+) -> None:
+    """
+    Start the web UI.
+
+    Args:
+        token: Access token (min. 16 characters). Defaults to $PII_FAKER_TOKEN,
+            or a random one that is printed so you can open the link.
+        retention_minutes: How long a job's files are kept without activity.
+        announce: Where startup messages go.
+    """
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+
+    app.state.auth = Authenticator(token or os.environ.get(TOKEN_ENV) or None)
+    app.state.retention_seconds = int(retention_minutes * 60)
+
+    shown_host = "localhost" if host in ("0.0.0.0", "::") else host
+    url = f"http://{shown_host}:{port}"
+    if app.state.auth.generated:
+        announce(f"Open this link to sign in: {url}/?token={app.state.auth.token}")
+    else:
+        announce(f"Open {url} and sign in with your access token.")
+
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        announce(
+            f"Warning: listening on {host} over plain HTTP, so the token and your data travel "
+            "unencrypted. Put a TLS-terminating proxy in front before using this on a network."
+        )
+    unit = "minute" if retention_minutes == 1 else "minutes"
+    announce(
+        f"Uploads, outputs and mappings are deleted after {retention_minutes:g} {unit} "
+        "without activity, and when the server stops."
+    )
+
+    uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    run_server()

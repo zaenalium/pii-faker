@@ -592,7 +592,12 @@
         async function apiFetch(path, options) {
             const merged = Object.assign({}, options);
             merged.headers = Object.assign({}, merged.headers, sessionHeaders());
-            return fetch(path, merged);
+            const response = await fetch(path, merged);
+            // A 401 means the session expired or the server restarted: reload to reach sign-in.
+            if (response.status === 401) {
+                window.location.reload();
+            }
+            return response;
         }
 
         // Presets (3.4)

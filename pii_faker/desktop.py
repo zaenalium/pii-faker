@@ -69,6 +69,13 @@ def create_app(session_token: str):
     from pii_faker.web.app import app as base_app
 
     base_app.state.session_token = session_token
+    # The window signs in with the same token (see main()). The desktop is single-user:
+    # it may process local paths, and it keeps jobs until it closes.
+    from pii_faker.web.auth import Authenticator
+
+    base_app.state.auth = Authenticator(session_token)
+    base_app.state.allow_local_paths = True
+    base_app.state.retention_seconds = 0
 
     @base_app.middleware("http")
     async def _require_session_token(request: Request, call_next):
@@ -154,6 +161,7 @@ def main() -> int:
     ready.wait(timeout=10)
 
     url = f"http://127.0.0.1:{port}/"
+    sign_in_url = f"{url}?token={session_token}"      # signs the window in, then redirects to /
     os.environ["PII_FAKER_SESSION_TOKEN"] = session_token
 
     try:
@@ -161,7 +169,7 @@ def main() -> int:
 
         window = webview.create_window(
             "PII Faker",
-            url,
+            sign_in_url,
             width=1100,
             height=800,
             min_size=(900, 650),
@@ -179,7 +187,7 @@ def main() -> int:
         print(f"PII Faker running at {url}")
         print("Press Ctrl+C to stop.")
         try:
-            webbrowser.open(url)
+            webbrowser.open(sign_in_url)
         except Exception:
             pass
         try:

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Callable, Dict, List, Optional
 
 import datetime
+import re
 
 import polars as pl
 
@@ -156,7 +157,9 @@ def plan_dataframe(
 
     if selected is not None:
         wanted = [s.strip() for s in selected if s and s.strip()]
-        selected_set = set(wanted)
+        # `a.b.c` and `a.b[*].c` name the same field: the web UI offers the first form
+        # while nested targets carry the second, so accept either.
+        selected_set = set(wanted) | {s.replace("[*]", "") for s in wanted}
         has_explicit_nested = any("." in s or "[*]" in s or ":" in s for s in wanted)
     else:
         wanted = []
@@ -177,14 +180,22 @@ def plan_dataframe(
         )
     }
 
+    def _in_selected(path: str) -> bool:
+        return path in selected_set or path.replace("[*]", "") in selected_set
+
     def _selected(path: str, column: str) -> bool:
         if selected is None:
             return True
-        return path in selected_set or column in selected_set
+        return _in_selected(path) or column in selected_set
+
+    # Columns handled as JSON documents are processed leaf by leaf (below), never as one
+    # flat value: value detection sees the email inside the text and would replace the
+    # whole document with a single fake email.
+    json_handled = set(config.json_columns or []) | {w.partition(":")[0] for w in wanted if ":" in w}
 
     # Flat columns (skip struct/list tops; those are covered by nested paths)
     for col_name, dtype in df.schema.items():
-        if isinstance(dtype, (pl.Struct, pl.List)):
+        if isinstance(dtype, (pl.Struct, pl.List)) or col_name in json_handled:
             continue
         info = flat_infos.get(col_name)
         value_info = value_infos.get(col_name)
@@ -235,7 +246,7 @@ def plan_dataframe(
             continue
         if selected is not None and not has_explicit_nested:
             continue
-        if selected is not None and path not in selected_set and top not in selected_set:
+        if selected is not None and not _in_selected(path) and top not in selected_set:
             continue
         if config.strict_paths and "." in path and not path.startswith(top + "."):
             continue
@@ -257,7 +268,7 @@ def plan_dataframe(
             df, list(config.extra_pii_columns or []), detector
         )
         for target in extra_targets:
-            if selected is not None and target.path not in selected_set:
+            if selected is not None and not _in_selected(target.path):
                 continue
             if any(t.path == target.path for t in plan.targets):
                 continue
@@ -283,7 +294,7 @@ def plan_dataframe(
             df, parent, detector, json_selected.get(parent)
         ):
             full = f"{parent}:{jpath}"
-            if selected is not None and full not in selected_set and parent not in selected_set:
+            if selected is not None and not _in_selected(full) and parent not in selected_set:
                 if not json_selected.get(parent):
                     continue
             if any(t.path == full for t in plan.targets):
@@ -659,7 +670,10 @@ def _unique_native_fake(original, category, field_name, generator, coerce):
 
     state = generator.run_state
     state.register_originals([str(original)])
-    for _ in range(MAX_FAKE_ATTEMPTS):
+    fake_text = ""
+    # Once a shape's random draws have run dry, don't burn the full retries on every value.
+    shape = (category, "native:" + re.sub(r"\d", "9", str(original)))
+    for _ in range(3 if shape in generator._exhausted else MAX_FAKE_ATTEMPTS):
         fake_text = generator.generate_fake_value(str(original), category, field_name)
         candidate = coerce(fake_text)
         key = str(candidate)
@@ -669,19 +683,62 @@ def _unique_native_fake(original, category, field_name, generator, coerce):
             continue
         state.used_fakes.add(key)
         return candidate
-    state.warn(
-        f"faker retries exhausted for {original!r} ({category}); using suffixed fallback"
-    )
-    n = state.next_fallback()
-    if isinstance(original, int):
-        candidate = original + n
-    elif isinstance(original, float):
-        candidate = original + n * 0.5 + 0.25
-    else:
-        candidate = coerce(f"{original}#F{n}")
+    generator._exhausted.add(shape)
+    state.warn(f"faker retries exhausted ({category}); using a non-revealing fallback")
+    candidate = _native_fallback(original, generator, coerce, fake_text)
     state.used_fakes.add(str(candidate))
     state.fallbacks += 1
     return candidate
+
+
+def _native_fallback(original, generator, coerce, fake_text: str):
+    """
+    A unique native value once random draws have run out, never derived from the
+    original's value (the old `original + n` and `original#F1` fallbacks returned
+    a number next to the real one, or the real date itself).
+    """
+    state = generator.run_state
+
+    def free(candidate, allow_originals: bool = False) -> bool:
+        key = str(candidate)
+        if not key or key == str(original) or key in state.used_fakes:
+            return False
+        return allow_originals or key not in state.originals
+
+    if isinstance(original, datetime.date):          # datetime is a date too
+        for allow in (False, True):
+            day = generator.next_free_date(lambda d, a=allow: free(coerce(d.isoformat()), a))
+            if day is not None:
+                return coerce(day.isoformat())
+    elif isinstance(original, (int, float)) and fake_text:
+        found = {}
+
+        def claim(allow: bool):
+            def check(variant: str) -> bool:
+                candidate = coerce(variant)
+                if free(candidate, allow):
+                    found["value"] = candidate
+                    return True
+                return False
+            return check
+
+        shape = ("native", re.sub(r"\d", "9", fake_text))
+        if generator.find_variant(shape, fake_text, False, claim(False), claim(True)) is not None:
+            return found["value"]
+
+    # Last resort: a value one digit wider than the original, from a global counter.
+    width = len(str(abs(int(original)))) if isinstance(original, (int, float)) else 4
+    while True:
+        n = state.next_fallback()
+        candidate = 10 ** (width + 1) + n
+        if isinstance(original, float):
+            candidate = float(candidate) + 0.25
+        elif isinstance(original, datetime.datetime):
+            candidate = datetime.datetime(1900, 1, 1) + datetime.timedelta(days=n)
+        elif isinstance(original, datetime.date):
+            candidate = datetime.date(1900, 1, 1) + datetime.timedelta(days=n)
+        if free(candidate):
+            return candidate
 
 
 def _coerce_number(fake_text: str, original):
