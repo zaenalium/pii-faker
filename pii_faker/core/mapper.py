@@ -12,13 +12,14 @@ Version 1 files are loaded transparently.
 
 import datetime
 import json
+import os
 import sqlite3
 import uuid
 from datetime import datetime as dt_datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union, Tuple
 
-from pii_faker.core.config import PIIConfig
+from pii_faker.core.config import PIIConfig, PIIMode, RedactionStyle
 from pii_faker import __version__ as TOOL_VERSION
 
 MAPPING_VERSION = "2.0"
@@ -66,6 +67,34 @@ def _decode_value(data: Dict[str, Any]) -> Any:
     if kind == "time":
         return datetime.time.fromisoformat(val)
     raise ValueError(f"Unknown encoded value type: {kind}")
+
+
+class AmbiguousMappingError(ValueError):
+    """Two different originals share one replacement, so restore cannot be exact."""
+
+
+def _open_private(path: str):
+    """Open `path` for writing as a file only the owner can read.
+
+    Mapping files hold real PII. The mode is applied before any data is
+    written, including when the file already exists with looser permissions.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except (AttributeError, OSError):  # not available on Windows
+        pass
+    return os.fdopen(fd, "w")
+
+
+def _make_private(path: str) -> None:
+    """Make sure `path` exists and is owner-only, without truncating it."""
+    if not os.path.exists(path):
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # e.g. Windows
+        pass
 
 
 def _entry_key(scope: str, column: str) -> Tuple[str, str]:
@@ -313,6 +342,34 @@ class PIIMapper:
             return reverse.get(replacement)
         return None
 
+    def is_lossless_mode(self) -> bool:
+        """True when the configured mode promises an exact restore through a lookup."""
+        return self.config.mode == PIIMode.FAKE or (
+            self.config.mode == PIIMode.REDACT
+            and self.config.redact_style in (RedactionStyle.TOKEN, RedactionStyle.TYPED_TOKEN)
+        )
+
+    def validate_reversible(self) -> None:
+        """
+        Raise AmbiguousMappingError if a mapping sends two originals to one replacement.
+
+        Only meaningful for fake and token modes: full/partial redaction is
+        many-to-one by design. The store already records `bijective` per entry;
+        this refuses to write a file that could not be restored exactly.
+        """
+        if not self.is_lossless_mode():
+            return
+        clashing = [
+            f"{column!r}" + (f" (sheet {scope!r})" if scope else "")
+            for (scope, column), entry in self.store._entries.items()
+            if not entry.get("bijective", True)
+        ]
+        if clashing:
+            raise AmbiguousMappingError(
+                "Mapping is not reversible: different originals share one replacement in "
+                + ", ".join(clashing)
+            )
+
     def save(self, path: str, *, passphrase: Optional[str] = None, encrypt: bool = False, use_keyring: bool = True):
         """Save mapping to file (JSON or SQLite).
 
@@ -320,6 +377,8 @@ class PIIMapper:
         (roadmap 3.1). Decryption is probed automatically on load, so old
         plaintext v2 files keep loading unchanged.
         """
+        self.validate_reversible()
+
         path_obj = Path(path)
         data = self.store.to_dict(session_id=self._session_id)
 
@@ -329,11 +388,11 @@ class PIIMapper:
             if path_obj.suffix in (".db", ".sqlite"):
                 raw = json.dumps(data, ensure_ascii=False).encode()
                 env = _crypto.encrypt_bytes(raw, passphrase=passphrase, use_keyring=use_keyring)
-                with open(path, "w") as f:
+                with _open_private(path) as f:
                     json.dump(env, f)
                 return
             env = _crypto.encrypt_dict(data, passphrase=passphrase, use_keyring=use_keyring)
-            with open(path, "w") as f:
+            with _open_private(path) as f:
                 json.dump(env, f)
             return
 
@@ -344,11 +403,12 @@ class PIIMapper:
 
     def _save_json(self, path: str, data: Dict[str, Any]):
         """Save as JSON file."""
-        with open(path, "w") as f:
+        with _open_private(path) as f:
             json.dump(data, f, indent=2)
 
     def _save_sqlite(self, path: str, data: Dict[str, Any]):
         """Save as SQLite database."""
+        _make_private(path)
         conn = sqlite3.connect(path)
         cursor = conn.cursor()
 

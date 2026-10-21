@@ -22,6 +22,7 @@ from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Callable, Dict, List, Optional
 
 import datetime
+import re
 
 import polars as pl
 
@@ -659,7 +660,10 @@ def _unique_native_fake(original, category, field_name, generator, coerce):
 
     state = generator.run_state
     state.register_originals([str(original)])
-    for _ in range(MAX_FAKE_ATTEMPTS):
+    fake_text = ""
+    # Once a shape's random draws have run dry, don't burn the full retries on every value.
+    shape = (category, "native:" + re.sub(r"\d", "9", str(original)))
+    for _ in range(3 if shape in generator._exhausted else MAX_FAKE_ATTEMPTS):
         fake_text = generator.generate_fake_value(str(original), category, field_name)
         candidate = coerce(fake_text)
         key = str(candidate)
@@ -669,19 +673,62 @@ def _unique_native_fake(original, category, field_name, generator, coerce):
             continue
         state.used_fakes.add(key)
         return candidate
-    state.warn(
-        f"faker retries exhausted for {original!r} ({category}); using suffixed fallback"
-    )
-    n = state.next_fallback()
-    if isinstance(original, int):
-        candidate = original + n
-    elif isinstance(original, float):
-        candidate = original + n * 0.5 + 0.25
-    else:
-        candidate = coerce(f"{original}#F{n}")
+    generator._exhausted.add(shape)
+    state.warn(f"faker retries exhausted ({category}); using a non-revealing fallback")
+    candidate = _native_fallback(original, generator, coerce, fake_text)
     state.used_fakes.add(str(candidate))
     state.fallbacks += 1
     return candidate
+
+
+def _native_fallback(original, generator, coerce, fake_text: str):
+    """
+    A unique native value once random draws have run out, never derived from the
+    original's value (the old `original + n` and `original#F1` fallbacks returned
+    a number next to the real one, or the real date itself).
+    """
+    state = generator.run_state
+
+    def free(candidate, allow_originals: bool = False) -> bool:
+        key = str(candidate)
+        if not key or key == str(original) or key in state.used_fakes:
+            return False
+        return allow_originals or key not in state.originals
+
+    if isinstance(original, datetime.date):          # datetime is a date too
+        for allow in (False, True):
+            day = generator.next_free_date(lambda d, a=allow: free(coerce(d.isoformat()), a))
+            if day is not None:
+                return coerce(day.isoformat())
+    elif isinstance(original, (int, float)) and fake_text:
+        found = {}
+
+        def claim(allow: bool):
+            def check(variant: str) -> bool:
+                candidate = coerce(variant)
+                if free(candidate, allow):
+                    found["value"] = candidate
+                    return True
+                return False
+            return check
+
+        shape = ("native", re.sub(r"\d", "9", fake_text))
+        if generator.find_variant(shape, fake_text, False, claim(False), claim(True)) is not None:
+            return found["value"]
+
+    # Last resort: a value one digit wider than the original, from a global counter.
+    width = len(str(abs(int(original)))) if isinstance(original, (int, float)) else 4
+    while True:
+        n = state.next_fallback()
+        candidate = 10 ** (width + 1) + n
+        if isinstance(original, float):
+            candidate = float(candidate) + 0.25
+        elif isinstance(original, datetime.datetime):
+            candidate = datetime.datetime(1900, 1, 1) + datetime.timedelta(days=n)
+        elif isinstance(original, datetime.date):
+            candidate = datetime.date(1900, 1, 1) + datetime.timedelta(days=n)
+        if free(candidate):
+            return candidate
 
 
 def _coerce_number(fake_text: str, original):
