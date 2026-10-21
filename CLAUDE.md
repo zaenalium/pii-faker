@@ -95,10 +95,63 @@ Phase 1 (desktop, unsigned) is complete: 1.1–1.7 + 1.9 done, 1.8 signing defer
 - Suite runs in ~4s; if pytest ever hangs, suspect value-detector regexes
   on large Hypothesis frames, not Polars.
 
+## Privacy invariants, web auth and the MCP gateway
+A round trip that restores exactly proves nothing about leaks: an unprocessed column
+also "restores exactly". Several bugs below passed every round-trip property test. Check
+the OUTPUT (`tests/test_privacy.py` does).
+
+- **A fake never contains, or is derived from, its original.** When random draws run dry
+  (`generate_unique_fake`): count through the last fake's own digits/letters
+  (`_odometer`, format-preserving), sweep dates forward with a cursor
+  (`next_free_date`, O(n) over a run), relax to "differs from its own original" for a dense
+  shape (`find_variant` / `_dense`), and only then use `category#F{n}`. The old fallback
+  was `{category}:{original}#F{n}` (and `original + n` for ints, the real date for
+  `pl.Date`): 8,000 of 9,000 dense 4-digit codes and 20,260 of 30,000 DOBs came out as the
+  real value inside a label. Shapes whose draws ran dry are remembered (`_exhausted`) so
+  dense columns stay fast. Warnings must never quote a value either.
+- **Identifiers randomise digits AND letters** (case/punctuation kept); digit-free ids
+  used to pass through unchanged.
+- **Nested list paths carry `[*]`** (`detect_nested_paths`). Apply/restore look fields up
+  by it; without it a field was mapped, saved and silently never applied. Selection
+  accepts either notation. The leak check descends into lists of structs.
+- **Columns handled as JSON text (`json_columns`, selected `col:path`) are never also
+  value-detected as one flat column**; that replaced every document with one fake email.
+- **Mapping files are `0600`** (`_open_private` / `_make_private`, incl. encrypted and
+  SQLite). `PIIMapper.save()` raises `AmbiguousMappingError` if a lossless-mode entry is
+  not `bijective`.
+- **Web (`web/`)**: `auth.py` (token -> `HttpOnly`/`SameSite=Strict` session cookie, or
+  `Authorization: Bearer`), enforced by fail-closed middleware in `app.py` (only
+  `PUBLIC_PATHS` are open). `JobStore` stamps every lookup so idle jobs expire
+  (`purge_expired_jobs`, lifespan reaper, purge at shutdown, `DELETE /api/jobs/{id}`).
+  `/api/detect-path` and `/api/process-path` read/write arbitrary paths, so they need
+  `app.state.allow_local_paths` (only the desktop launcher sets it). The desktop's
+  `create_app` also installs `Authenticator(session_token)`, disables idle expiry
+  (`retention_seconds = 0`: its Delete-mapping button needs the job), and its window opens
+  `/?token=...`. `create_app` adds middleware to the shared app for good, so
+  `test_web.py` exercises it in a subprocess.
+- **MCP gateway (`mcp_server.py`, optional `mcp` extra)**: everything a tool returns goes
+  to the LLM provider. `Gateway` plans with `plan_dataframe`, applies with `apply_plan`
+  (one `RunState`/`PIIMapper`, scope = dataset name, so a person is the same across
+  datasets) and tools read only the faked, pruned copy. Exposure is an ALLOWLIST
+  (`Policy`): faked or `--keep` only. Unprocessable targets (`plan.skipped`, which also
+  appear in `plan.targets`) and free text are blocked; structures the detector can't see
+  (a list of lists) are dropped. Every tool is wrapped in `_safe`: only `GatewayError`
+  text reaches the model and only the exception TYPE is logged (Polars quotes cells; SDK 2.2
+  hides the text from the client but logs the traceback). The model never supplies a path;
+  `restore_to_file` returns only `{saved_as, replacements}`. HTTP wraps the whole ASGI app in
+  `BearerAuthMiddleware` and sets Host/Origin checks, so a tunnel needs `--allowed-host`.
+  Everything the command prints goes to stderr (stdout is the stdio protocol). Refuses
+  partial/shift/perturb. SDK is `mcp` 2.x: `MCPServer` in `mcp.server.mcpserver`, HTTP client
+  takes an `httpx2` client.
+- After touching auth, expiry, path gating or the gateway, BREAK the property on purpose
+  (e.g. `Authenticator.is_authenticated = lambda *a: True`, `Policy.allows = lambda *a: True`)
+  and confirm a test fails. To mutate a FastAPI dependency, patch the function's `__code__`:
+  rebinding the module name does nothing, the route captured the original.
+
 ## Conventions
 - Polars only, never pandas. Native expressions in hot paths; `map_elements`
   only for JSON-string leaves (unique values, cold path).
-- Tests: `python -m pytest -q` (41 tests, must stay green). Hypothesis is
-  available (6.168.2) for the planned property tests.
+- Tests: `python -m pytest -q` (269 tests, ~20s, must stay green). Needs the dev extra
+  (Hypothesis, pytest-asyncio) and, for `test_mcp.py`, the `mcp` extra.
 - Commit messages end with `Co-authored-by: CommandCodeBot <noreply@commandcode.ai>`
   and are passed via HEREDOC — but only commit when explicitly asked.

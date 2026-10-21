@@ -11,7 +11,8 @@ A Python toolkit for detecting, faking, or redacting Personally Identifiable Inf
 - **Reversible Mapping**: All transformations are reversible via mapping files (v2 format with native types, per-sheet scope, and session ID)
 - **Multiple Formats**: Supports CSV, Excel, JSON, NDJSON, Parquet
 - **Nested JSON**: Full support for nested structures and JSON paths
-- **CLI & Web UI**: Command-line interface and web-based interface
+- **CLI & Web UI**: Command-line interface and web-based interface. The web UI requires an access token and deletes your files after an idle period
+- **MCP server** for LLM providers you don't trust: the model only ever sees faked data, locally or through a tunnel (see [MCP Server](#mcp-server-using-an-llm-provider-you-dont-trust))
 - **High Performance**: Uses Polars for vectorized operations and unique-values-first approach
 
 ## Installation
@@ -28,6 +29,9 @@ pip install -e ".[desktop]"
 
 # Install with encryption support (AES-GCM + keychain)
 pip install -e ".[enc]"
+
+# Install the MCP server (see "MCP Server")
+pip install -e ".[mcp]"
 ```
 
 ## Desktop App (macOS today, Windows next)
@@ -159,7 +163,15 @@ restored_df = restore_dataframe(processed_df, mapper)
 pii-faker serve --port 8000
 ```
 
-Open http://localhost:8000 in your browser to:
+The server prints a sign-in link containing this run's access token:
+
+```
+Open this link to sign in: http://127.0.0.1:8000/?token=...
+```
+
+Open it in your browser (it signs you in and removes the token from the address bar). To use a token of your own, set `PII_FAKER_TOKEN` (at least 16 characters) before starting; the link is then not printed and you sign in by typing the token. Scripts can send `Authorization: Bearer <token>`. Jobs (uploads, outputs, mappings) are deleted after `--retention-minutes` (default 60) without activity, with `DELETE /api/jobs/<job id>`, and when the server stops. See [Web UI security](#web-ui-security).
+
+Once signed in:
 1. Upload files (500 MB cap; filenames are sanitised)
 2. Preview detected PII columns (flat, nested, and JSON-string leaves)
 3. Select columns to process (Redact + typed-token is the LLM-safe default)
@@ -196,6 +208,150 @@ pii-faker proxy --upstream https://api.openai.com --port 11434
 > Note: the web UI runs on localhost only and is designed for a single
 > trusted user. Uploaded originals and plaintext mappings live in a temp
 > directory until you download the results, then are deleted.
+
+## MCP Server: Using an LLM Provider You Don't Trust
+
+Everything an MCP tool returns is sent to your LLM provider, so an ordinary MCP server that reads your files hands them over. `pii-faker mcp` fakes the data **once, at startup**, and every tool only reads that faked copy. The mapping back to the real values stays on your machine and no tool can return it.
+
+```bash
+pip install -e ".[mcp]"
+
+# 1. Look at what the model would be able to see. Nothing is served
+pii-faker mcp --dataset patients=patients.csv --keep age,visits --dry-run
+
+# 2. Serve it. Your MCP client launches this command (stdio)
+pii-faker mcp --dataset patients=patients.csv --keep age,visits \
+  --mapping-out private/mapping.json --restore-dir private/restored
+```
+
+Most MCP clients take a configuration like this (see your client's documentation for where it goes):
+
+```json
+{
+  "mcpServers": {
+    "pii-faker": {
+      "command": "/full/path/to/pii-faker",
+      "args": ["mcp", "--dataset", "patients=/data/patients.csv", "--keep", "age,visits",
+               "--seed", "7", "--mapping-out", "/data/private/mapping.json"]
+    }
+  }
+}
+```
+
+Use the full path from `which pii-faker`: desktop apps don't inherit your shell's `PATH`. Keep `--seed`: without it the fakes change every time the app starts the server, and the mapping file is overwritten, so earlier answers can no longer be restored.
+
+### What the model can see
+
+**Columns are an allowlist.** A column, nested field or JSON key reaches the model only if it was faked or you named it in `--keep`. Anything the detector did not recognise is **dropped**, and so is PII the pipeline could not process (an unsupported column type) or only partly handled (free text). Structures the detector cannot see into, such as a list of lists, are dropped too, never shown as-is. This is the opposite of `pii-faker process`, which passes unrecognised columns through, and it is why an untrusted provider needs a different tool.
+
+```
+$ pii-faker mcp --dataset sample=sample.csv --dry-run
+ Column / field  Exposed as
+ date_of_birth   faked
+ email           faked
+ patient_name    faked
+ phone           faked
+ patient_id      dropped
+ note            dropped
+```
+
+The report lists column names only, never values. Columns are recognised by name and by the shape of their values, exactly as for `process`. If you need a column the detector doesn't know, name it with `-e` to fake it or `--keep` to show it unchanged. `--keep-unmatched` exposes every unrecognised column as-is; it is there for data you've already vetted and is not recommended for an untrusted provider.
+
+### Tools
+
+All read-only, all working on the faked copy, and all row-capped (`--max-rows`, default 100).
+
+| Tool | What it does |
+|---|---|
+| `list_datasets` | Dataset aliases with row and column counts |
+| `describe_dataset` | Columns, types, whether each is faked, null/distinct counts, a 5-row sample |
+| `read_rows` | A page of rows, optionally some columns |
+| `search_rows` | Rows where a column equals or contains a value (matches the *faked* values) |
+| `aggregate` | Group by columns and compute count, n_unique, sum, mean, min, max |
+| `restore_to_file` | Only with `--restore-dir`: puts real values back into text that quotes fakes and saves it **on your machine**. The model gets back a file name and a count, never the text |
+
+The model never supplies a file path: datasets are the aliases you registered with `--dataset name=path`. It is told that the data is synthetic and to quote values exactly, so that you can map its answers back.
+
+### Restoring the model's answers
+
+Either let the model call `restore_to_file` (the restored text lands in `--restore-dir`; never expose that folder to the model), or restore afterwards yourself with the mapping you saved:
+
+```bash
+pii-faker restore answer_fake.txt --mapping private/mapping.json --output answer.txt --text
+```
+
+Only fakes the model repeated verbatim are found; a paraphrase like "Mr. Rhodes" is not restored. Without `--mapping-out` or `--restore-dir` the real values cannot be recovered after the server stops, and it warns you.
+
+### `mcp` options
+
+| Option | Meaning |
+|---|---|
+| `-d, --dataset name=path` | A dataset to serve (repeat for several). Excel uses the first sheet |
+| `--keep a,b.c,col:json.key` | Expose these columns, nested paths or JSON keys with their original values |
+| `--keep-unmatched` | Expose every unrecognised column as-is (not recommended) |
+| `-e`, `-j`, `--match-strategy`, `--override-defaults`, `--strict-paths`, `--seed`, `--locale`, `--preset` | As for `process`; saved custom columns apply too |
+| `--mode`, `--redact-style` | `fake` (default), or `redact` with `typed-token` (default), `token` or `full`. `partial`, `shift` and `perturb` are refused: they leave identifying values visible |
+| `-m, --mapping-out` | Save the real↔fake mapping to a private (`0600`) file |
+| `--restore-dir` | Enable `restore_to_file`, saving into this folder |
+| `--max-rows` | Most rows a tool call returns (default 100) |
+| `--transport` | `stdio` (default) or `http` |
+| `--host`, `-p/--port` | `http` only: bind address (default `127.0.0.1`) and port (default `8765`) |
+| `--token` | `http` only: access token, at least 16 characters. Prefer the `PII_FAKER_MCP_TOKEN` environment variable. Generated and printed if omitted |
+| `--allowed-host` | `http` only: a hostname the server may be reached by, such as your tunnel's (repeatable) |
+| `--dry-run` | Show what the model would see, then exit |
+
+### Using it remotely
+
+Where the server runs decides where the real data and mapping live. The model (and your provider) only ever sees the faked copy, wherever it is served from.
+
+**1. Client and data on the same machine.** Use stdio, as above. No network is involved.
+
+**2. Data on a remote machine, client on yours.** Run the server over SSH, so the client talks stdio through the connection and no port is opened (log in with a key: an AI app can't type a password):
+
+```json
+{ "mcpServers": { "pii-faker": {
+    "command": "ssh",
+    "args": ["-T", "me@data-host", "/home/me/venv/bin/pii-faker", "mcp", "--dataset", "patients=/srv/pii/patients.csv",
+             "--keep", "age,visits", "--seed", "7", "--mapping-out", "/srv/pii/private/mapping.json"]
+} } }
+```
+
+`ssh` joins these arguments and the remote shell parses them again, so a path with a space needs quotes inside the string: `"patients='/srv/my data/patients.csv'"`. Or serve HTTP on the remote machine and forward the port, which keeps it off the network: `ssh -L 8765:127.0.0.1:8765 me@data-host`, then point the client at `http://127.0.0.1:8765/mcp`.
+
+**3. A client that can only reach a public HTTPS address (a hosted agent platform, say).** Serve HTTP and put a tunnel in front:
+
+```bash
+# start the tunnel first, so you know its hostname
+cloudflared tunnel --url http://127.0.0.1:8765        # or: ngrok http 8765
+
+export PII_FAKER_MCP_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+pii-faker mcp --dataset patients=patients.csv --keep age,visits --seed 7 \
+  --transport http --port 8765 --allowed-host abc-123.trycloudflare.com \
+  --mapping-out private/mapping.json
+```
+
+Give the client the URL `https://abc-123.trycloudflare.com/mcp` and the header `Authorization: Bearer <your token>`. Without `--allowed-host` the server answers `421 Invalid Host header`: it checks the `Host` and `Origin` headers to defeat DNS-rebinding, and your tunnel's hostname is not one it expects.
+
+What a tunnel does and doesn't change:
+
+- **The real data and the mapping stay on your machine.** The tunnel carries only faked, pruned data and the token.
+- **The tunnel provider can read that traffic** (it terminates TLS), and so can your LLM provider. Both see only the faked copy, but treat the token as a secret and use a fresh one per session.
+- **Every request needs the token**, compared in constant time, before anything else happens. The server does not rate-limit, which is why a token you supply must be 16+ characters.
+- **Prefer a private network when you can.** Tailscale (`tailscale serve`) keeps the endpoint inside your tailnet instead of on the public internet. Cloudflare Access or an ngrok access policy add a second lock in front of the token.
+- **Your client must be able to send an `Authorization` header.** Connectors that support only OAuth sign-in cannot use this; this server does not implement OAuth.
+- The server listens on `127.0.0.1` only unless you pass `--host`, and warns if you expose it over plain HTTP.
+
+The HTTP transport, token check and host check are covered by tests against a real server and client, and the command was exercised as a separate process. The SSH configuration was exercised with a stand-in that handles arguments the way `ssh` does, not a real SSH session, and I have not run it through cloudflared, ngrok or Tailscale, so check those steps against their own documentation.
+
+### What this does not protect against
+
+- **Pseudonymised is not anonymous.** Columns you `--keep` and any quasi-identifiers in them (a rare diagnosis with a postcode and birth year) can still identify people.
+- **Relationships are preserved on purpose.** The same person has the same fake in every row, column and dataset, so linkage, frequencies and the number of distinct values are visible. Row order is preserved too: a file sorted by real surname shows its fake names in that same order.
+- **Fake dates and ids carry no real statistics.** Keep a derived column (an `age`) if the model needs one.
+- **The model can page through everything exposed.** There is no per-session budget; stop the server when you are done.
+- **Detection is by name and value shape.** That is why unrecognised columns are dropped. Free-text columns are only shown if you `--keep` them, with whatever PII they contain.
+- **Don't attach other raw-data MCP servers to the same session.** One tool that reads the originals defeats all of this.
+- Everything is held in memory (limits as for `process`), and the datasets are fixed when the server starts.
 
 ## JSON & Nested JSON Support
 
@@ -283,6 +439,7 @@ PII-shaped column is reported as a warning.
 - Save them wherever you like via `--mapping-out`; there is no automatic default directory
 - JSON (`.json`, small mappings) and SQLite (`.db`/`.sqlite`, large mappings) formats — chosen by `--mapping-out` extension
 - Mappings are v2: native value types, per-sheet scope, session ID, and tool version. Version 1 files still load.
+- On Unix mapping files are created readable by the owner only (mode `0600`), including when you overwrite an existing, more open file, and encrypted ones too. `save` also refuses a mapping that sends two originals to one replacement in `fake`/`token` modes, since it could not be restored exactly
 
 > Note: SQLite changes only the file format, not memory use — the full
 > mapping is still loaded into memory to save and to restore.
@@ -308,6 +465,16 @@ pii-faker cleanup --older-than 7d --directory /path/to/mappings
 ```
 
 **Important**: Mapping files contain real PII. Treat them as sensitive data.
+
+### Web UI security
+
+- **Token required.** Every route except the sign-in page needs the access token (a random 256-bit value unless you set your own). A browser exchanges it once for a session cookie (`HttpOnly`, `SameSite=Strict`, 8 hours) and the token is not kept in the browser. Responses are marked `no-store`. The desktop app signs its window in with its per-launch token the same way, and still sends its `X-PII-Session` header
+- **One shared token, no accounts.** Everyone holding it can see every job. It suits a single user or a small trusted team, not a multi-tenant service
+- **No rate limiting.** That is why a token you supply must be at least 16 characters
+- **Plain HTTP.** The server binds to `127.0.0.1` by default. If you listen on a network address, the token and your data travel unencrypted unless you put a TLS-terminating proxy in front; the server warns when you do
+- **Files are temporary.** Uploads, outputs and mappings live in a private temp directory. Jobs are deleted after `--retention-minutes` (default 60) without activity, on request with `DELETE /api/jobs/<job id>`, after you download a result, and when the server stops. The desktop app keeps its jobs until it closes
+- **Local-path processing is desktop-only.** `/api/detect-path` and `/api/process-path` read and write whatever path the client names, which is right for the single-user desktop app and wrong for a server others can reach, so `pii-faker serve` answers 403 for them
+- Jobs and sessions are held in memory by a single process, so restarting the server signs everyone out and drops every job
 
 ## Performance
 
@@ -340,6 +507,19 @@ pytest --cov=pii_faker
 pytest pii_faker/tests/test_core.py
 ```
 
+`pip install -e ".[dev]"` brings in everything the suite needs (Hypothesis, `pytest-asyncio` for the proxy tests). The MCP tests need the `mcp` extra and are skipped without it.
+
+| File | Covers |
+|---|---|
+| `test_core.py`, `test_roundtrip.py` | Unit tests and Hypothesis property tests for the pipeline (round trips of flat, nested, JSON, date and int data) |
+| `test_detection.py`, `test_ner.py` | Value-shape detection, confidence, leak check, locale; optional NER |
+| `test_phase3.py`, `test_phase4.py`, `test_proxy.py` | Encryption, audit, presets, expiry; LLM round-trip workflow; local proxy |
+| `test_privacy.py` | Fakes never contain the original, identifiers, list-of-struct fields are applied, JSON columns keep their structure, the leak check sees inside lists, private mapping files, ambiguous mappings |
+| `test_web.py` | Web UI sign-in and token checks, job expiry and cleanup, desktop interplay, desktop-only local paths, detect → process → restore |
+| `test_mcp.py` | MCP gateway: what is exposed, that no tool returns a real value (canary test), error handling, restore tool, HTTP auth and host checks |
+
+A round-trip test passing does not show the output is clean: an unprocessed column also "restores exactly". `test_privacy.py` checks the output itself.
+
 ## Limitations & Next Steps
 
 ### Current Limitations
@@ -349,6 +529,8 @@ pytest pii_faker/tests/test_core.py
 - Very large mappings (>100k entries) load fully into memory on save and restore, including SQLite mappings
 - `redact --redact-style full/partial` is not exactly reversible (many-to-one placeholders); use `fake`, `token`, or `typed-token` when lossless restore matters
 - Non-string columns (int, date, …) are faked with native-type fakes; columns with unsupported dtypes are skipped with a warning
+- Nested detection looks one list level deep: PII inside a list of lists is not detected, so `process` leaves it as it is (the MCP gateway drops such columns instead)
+- Web UI: one shared access token (no per-user accounts), plain HTTP, jobs held in memory by a single process
 
 ### Next Steps
 
